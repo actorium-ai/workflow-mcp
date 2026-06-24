@@ -1,0 +1,113 @@
+import { BffClient, BffAuthError } from './bffClient';
+
+const mockFetch = jest.fn();
+global.fetch = mockFetch;
+
+function makeResponse(status: number, body: unknown = {}): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: String(status),
+    json: () => Promise.resolve(body),
+    text: () => Promise.resolve(JSON.stringify(body)),
+  } as unknown as Response;
+}
+
+describe('BffClient', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  describe('Cookie header', () => {
+    it('attaches Cookie: session_id header when sessionCookie is set', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse(200, { ok: true }));
+      const client = new BffClient('http://bff.example.com', 'abc123');
+      await client.get('/api/test');
+
+      const [, init] = mockFetch.mock.calls[0];
+      expect(init.headers['Cookie']).toBe('session_id=abc123');
+    });
+
+    it('does not attach Cookie header when sessionCookie is undefined', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse(200, { ok: true }));
+      const client = new BffClient('http://bff.example.com', undefined);
+      await client.get('/api/test');
+
+      const [, init] = mockFetch.mock.calls[0];
+      expect(init.headers['Cookie']).toBeUndefined();
+    });
+
+    it('strips trailing slash from bffUrl before appending path', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse(200, {}));
+      const client = new BffClient('http://bff.example.com/', 'tok');
+      await client.get('/api/foo');
+
+      const [url] = mockFetch.mock.calls[0];
+      expect(url).toBe('http://bff.example.com/api/foo');
+    });
+  });
+
+  describe('401 handling', () => {
+    it('throws BffAuthError with re-auth guidance on 401', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse(401));
+      const client = new BffClient('http://bff.example.com', 'expired');
+
+      await expect(client.get('/api/test')).rejects.toThrow(BffAuthError);
+    });
+
+    it('401 error message mentions WORKFLOW_SESSION_COOKIE', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse(401));
+      const client = new BffClient('http://bff.example.com', 'expired');
+
+      await expect(client.get('/api/test')).rejects.toThrow('WORKFLOW_SESSION_COOKIE');
+    });
+
+    it('401 error message mentions re-login guidance', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse(401));
+      const client = new BffClient('http://bff.example.com', 'expired');
+
+      await expect(client.get('/api/test')).rejects.toThrow(/log in again/i);
+    });
+  });
+
+  describe('non-401 error handling', () => {
+    it('throws a plain Error with status info on 500', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse(500, 'internal error'));
+      const client = new BffClient('http://bff.example.com', 'tok');
+
+      await expect(client.get('/api/test')).rejects.toThrow('500');
+    });
+
+    it('throws on 404', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse(404));
+      const client = new BffClient('http://bff.example.com', 'tok');
+
+      await expect(client.get('/api/test')).rejects.toThrow('404');
+    });
+  });
+
+  describe('get', () => {
+    it('sends a GET request to the given path', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse(200, { id: '1' }));
+      const client = new BffClient('http://bff.example.com', 'tok');
+      const result = await client.get<{ id: string }>('/api/features');
+
+      const [, init] = mockFetch.mock.calls[0];
+      expect(init.method).toBe('GET');
+      expect(result).toEqual({ id: '1' });
+    });
+  });
+
+  describe('post', () => {
+    it('sends a POST request with JSON body', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse(200, { created: true }));
+      const client = new BffClient('http://bff.example.com', 'tok');
+      const result = await client.post<{ created: boolean }>('/api/tasks', { name: 'T1' });
+
+      const [, init] = mockFetch.mock.calls[0];
+      expect(init.method).toBe('POST');
+      expect(init.body).toBe(JSON.stringify({ name: 'T1' }));
+      expect(result).toEqual({ created: true });
+    });
+  });
+});
