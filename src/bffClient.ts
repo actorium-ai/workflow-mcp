@@ -5,6 +5,17 @@ export class BffAuthError extends Error {
   }
 }
 
+export class BffRequestError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly body: unknown,
+  ) {
+    super(message);
+    this.name = 'BffRequestError';
+  }
+}
+
 export class BffClient {
   private readonly bffUrl: string;
   private readonly sessionCookie: string | undefined;
@@ -36,8 +47,18 @@ export class BffClient {
     }
 
     if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      throw new Error(`BFF request failed: ${response.status} ${response.statusText}${body ? ` — ${body}` : ''}`);
+      let body: unknown;
+      const text = await response.text().catch(() => '');
+      try {
+        body = text ? JSON.parse(text) : undefined;
+      } catch {
+        body = text || undefined;
+      }
+      throw new BffRequestError(
+        `BFF request failed: ${response.status} ${response.statusText}${text ? ` — ${text}` : ''}`,
+        response.status,
+        body,
+      );
     }
 
     return response.json() as Promise<T>;
