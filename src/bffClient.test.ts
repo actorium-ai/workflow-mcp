@@ -1,4 +1,4 @@
-import { BffClient, BffAuthError } from './bffClient';
+import { BffClient, BffAuthError, BffRequestError } from './bffClient';
 
 const mockFetch = jest.fn();
 global.fetch = mockFetch;
@@ -71,11 +71,18 @@ describe('BffClient', () => {
   });
 
   describe('non-401 error handling', () => {
-    it('throws a plain Error with status info on 500', async () => {
+    it('throws a BffRequestError with status info on 500', async () => {
       mockFetch.mockResolvedValueOnce(makeResponse(500, 'internal error'));
       const client = new BffClient('http://bff.example.com', 'tok');
 
-      await expect(client.get('/api/test')).rejects.toThrow('500');
+      let err: unknown;
+      try {
+        await client.get('/api/test');
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(BffRequestError);
+      expect((err as BffRequestError).message).toContain('500');
     });
 
     it('throws on 404', async () => {
@@ -83,6 +90,34 @@ describe('BffClient', () => {
       const client = new BffClient('http://bff.example.com', 'tok');
 
       await expect(client.get('/api/test')).rejects.toThrow('404');
+    });
+
+    it('BffRequestError carries the status code', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse(422, [{ name: 'T1', reason: 'duplicate' }]));
+      const client = new BffClient('http://bff.example.com', 'tok');
+
+      let err: BffRequestError | undefined;
+      try {
+        await client.get('/api/test');
+      } catch (e) {
+        if (e instanceof BffRequestError) err = e;
+      }
+      expect(err).toBeInstanceOf(BffRequestError);
+      expect(err?.status).toBe(422);
+    });
+
+    it('BffRequestError carries the parsed JSON body', async () => {
+      const failureBody = [{ name: 'T1', reason: 'already exists' }];
+      mockFetch.mockResolvedValueOnce(makeResponse(422, failureBody));
+      const client = new BffClient('http://bff.example.com', 'tok');
+
+      let err: BffRequestError | undefined;
+      try {
+        await client.get('/api/test');
+      } catch (e) {
+        if (e instanceof BffRequestError) err = e;
+      }
+      expect(err?.body).toEqual(failureBody);
     });
   });
 
