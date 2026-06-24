@@ -1,0 +1,8 @@
+node_modules/
+dist/
+dist-test/
+*.js.map
+coverage/
+.env
+.env.local
+*.tsbuildinfo
