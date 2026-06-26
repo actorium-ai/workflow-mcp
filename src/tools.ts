@@ -8,13 +8,19 @@ export interface Feature {
   feature_id: string;
   feature_name: string;
   title: string;
-  feature_status: string;
+  status: string;
   current_stage: string;
   owner?: string;
 }
 
 export interface FeaturesResponse {
-  features: Feature[];
+  success: boolean;
+  data: {
+    items: Feature[];
+    total: number;
+    page: number;
+    limit: number;
+  };
 }
 
 export interface TaskInput {
@@ -74,13 +80,13 @@ export async function handleGetFeature(
   let response: FeaturesResponse;
   try {
     response = await bffClient.get<FeaturesResponse>(
-      `/api/workspaces/${encodeURIComponent(workspace_id)}/features?name=${encodeURIComponent(name)}`,
+      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/features?name=${encodeURIComponent(name)}`,
     );
   } catch (err) {
     return formatBffError(err);
   }
 
-  const features = response.features ?? [];
+  const features = response.data?.items ?? [];
   if (features.length === 0) {
     return {
       content: [{ type: 'text', text: `Feature not found: "${name}" in workspace ${workspace_id}` }],
@@ -99,7 +105,7 @@ export async function handleCreateTasks(
   const { workspace_id, feature_id, tasks } = args;
   try {
     const response = await bffClient.post<CreateTasksResponse>(
-      `/api/workspaces/${encodeURIComponent(workspace_id)}/features/${encodeURIComponent(feature_id)}/tasks`,
+      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/features/${encodeURIComponent(feature_id)}/tasks`,
       { tasks },
     );
     return {

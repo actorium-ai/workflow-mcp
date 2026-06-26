@@ -39,13 +39,13 @@ describe('handleGetFeature', () => {
     feature_id: 'feat-uuid-1',
     feature_name: 'my-feature',
     title: 'My Feature',
-    feature_status: 'in_implementation',
+    status: 'in_implementation',
     current_stage: 'tasks',
   };
 
   it('returns the feature JSON when found', async () => {
     const client = makeClient();
-    client.get = jest.fn().mockResolvedValueOnce({ features: [feature] } as FeaturesResponse);
+    client.get = jest.fn().mockResolvedValueOnce({ success: true, data: { items: [feature], total: 1, page: 1, limit: 0 } } as FeaturesResponse);
 
     const result = await handleGetFeature({ workspace_id: 'ws-1', name: 'my-feature' }, client);
 
@@ -56,25 +56,25 @@ describe('handleGetFeature', () => {
 
   it('calls the correct BFF endpoint', async () => {
     const client = makeClient();
-    client.get = jest.fn().mockResolvedValueOnce({ features: [feature] } as FeaturesResponse);
+    client.get = jest.fn().mockResolvedValueOnce({ success: true, data: { items: [feature], total: 1, page: 1, limit: 0 } } as FeaturesResponse);
 
     await handleGetFeature({ workspace_id: 'ws-1', name: 'my-feature' }, client);
 
-    expect(client.get).toHaveBeenCalledWith('/api/workspaces/ws-1/features?name=my-feature');
+    expect(client.get).toHaveBeenCalledWith('/bff/workflow-backend/api/workspaces/ws-1/features?name=my-feature');
   });
 
   it('encodes special characters in workspace_id and name', async () => {
     const client = makeClient();
-    client.get = jest.fn().mockResolvedValueOnce({ features: [feature] } as FeaturesResponse);
+    client.get = jest.fn().mockResolvedValueOnce({ success: true, data: { items: [feature], total: 1, page: 1, limit: 0 } } as FeaturesResponse);
 
     await handleGetFeature({ workspace_id: 'ws/1', name: 'my feature' }, client);
 
-    expect(client.get).toHaveBeenCalledWith('/api/workspaces/ws%2F1/features?name=my%20feature');
+    expect(client.get).toHaveBeenCalledWith('/bff/workflow-backend/api/workspaces/ws%2F1/features?name=my%20feature');
   });
 
   it('returns not-found message when features array is empty', async () => {
     const client = makeClient();
-    client.get = jest.fn().mockResolvedValueOnce({ features: [] } as FeaturesResponse);
+    client.get = jest.fn().mockResolvedValueOnce({ success: true, data: { items: [], total: 0, page: 1, limit: 0 } } as FeaturesResponse);
 
     const result = await handleGetFeature({ workspace_id: 'ws-1', name: 'missing' }, client);
 
@@ -137,7 +137,7 @@ describe('handleCreateTasks', () => {
 
     await handleCreateTasks({ workspace_id: 'ws-1', feature_id: 'feat-uuid-1', tasks }, client);
 
-    expect(client.post).toHaveBeenCalledWith('/api/workspaces/ws-1/features/feat-uuid-1/tasks', { tasks });
+    expect(client.post).toHaveBeenCalledWith('/bff/workflow-backend/api/workspaces/ws-1/features/feat-uuid-1/tasks', { tasks });
   });
 
   it('returns failure list on 422 with array body', async () => {

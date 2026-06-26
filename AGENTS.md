@@ -6,7 +6,7 @@ workflow BFF API. It exposes two tools: `get_feature` and `create_tasks`.
 ## Prerequisites
 
 1. The `workflow-mcp` binary is on your PATH (`npm link` after `npm run build`).
-2. `WORKFLOW_BFF_URL` is set (or defaults to `http://localhost:3000`).
+2. `WORKFLOW_BFF_URL` is set (or defaults to `http://localhost:8090`).
 3. `WORKFLOW_SESSION_COOKIE` is set to a valid `session_id` cookie value.
 
 ## Tools
@@ -77,5 +77,5 @@ Always show the full failure list to the user before deciding.
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `WORKFLOW_BFF_URL` | `http://localhost:3000` | BFF base URL |
+| `WORKFLOW_BFF_URL` | `http://localhost:8090` | BFF base URL |
 | `WORKFLOW_SESSION_COOKIE` | — | `session_id` cookie value |

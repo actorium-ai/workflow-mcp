@@ -14,7 +14,7 @@ describe('loadConfig', () => {
   it('uses default BFF URL when WORKFLOW_BFF_URL is not set', () => {
     delete process.env.WORKFLOW_BFF_URL;
     const config = loadConfig();
-    expect(config.bffUrl).toBe('http://localhost:3000');
+    expect(config.bffUrl).toBe('http://localhost:8090');
   });
 
   it('uses WORKFLOW_BFF_URL from env when set', () => {

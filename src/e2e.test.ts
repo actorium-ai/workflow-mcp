@@ -21,7 +21,7 @@ const SEEDED_FEATURE: Feature = {
   feature_id: FEATURE_NAME,
   feature_name: FEATURE_NAME,
   title: 'E2E Test Feature',
-  feature_status: 'in_implementation',
+  status: 'in_implementation',
   current_stage: 'tasks',
   owner: 'go',
 };
@@ -52,18 +52,18 @@ function startFakeBff(): Promise<FakeBff> {
     const url = new URL(req.url!, 'http://localhost');
     const { pathname } = url;
 
-    // GET /api/workspaces/:ws_id/features?name=...
-    const featuresMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/features$/);
+    // GET /bff/workflow-backend/api/workspaces/:ws_id/features?name=...
+    const featuresMatch = pathname.match(/^\/bff\/workflow-backend\/api\/workspaces\/([^/]+)\/features$/);
     if (featuresMatch && req.method === 'GET') {
       const name = url.searchParams.get('name') ?? '';
       const features = name === FEATURE_NAME ? [SEEDED_FEATURE] : [];
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ features }));
+      res.end(JSON.stringify({ success: true, data: { items: features, total: features.length, page: 1, limit: 0 } }));
       return;
     }
 
-    // POST /api/workspaces/:ws_id/features/:feature_id/tasks
-    const tasksMatch = pathname.match(/^\/api\/workspaces\/([^/]+)\/features\/([^/]+)\/tasks$/);
+    // POST /bff/workflow-backend/api/workspaces/:ws_id/features/:feature_id/tasks
+    const tasksMatch = pathname.match(/^\/bff\/workflow-backend\/api\/workspaces\/([^/]+)\/features\/([^/]+)\/tasks$/);
     if (tasksMatch && req.method === 'POST') {
       let body = '';
       req.on('data', (chunk: Buffer) => {

@@ -3,7 +3,7 @@ export interface Config {
   sessionCookie: string | undefined;
 }
 
-const DEFAULT_BFF_URL = 'http://localhost:3000';
+const DEFAULT_BFF_URL = 'http://localhost:8090';
 
 export function loadConfig(): Config {
   const bffUrl = process.env.WORKFLOW_BFF_URL ?? DEFAULT_BFF_URL;

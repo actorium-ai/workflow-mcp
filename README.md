@@ -24,7 +24,7 @@ This compiles TypeScript to `dist/` and symlinks the `workflow-mcp` binary onto 
 ```sh
 claude mcp add workflow-mcp \
   --scope local \
-  --env WORKFLOW_BFF_URL=http://localhost:3000 \
+  --env WORKFLOW_BFF_URL=http://localhost:8090 \
   --env WORKFLOW_SESSION_COOKIE=<your-session-id> \
   -- workflow-mcp
 ```
@@ -35,7 +35,7 @@ The `install.sh` script in the parent `workflow` repo runs this command for you.
 
 | Variable | Default | Description |
 |---|---|---|
-| `WORKFLOW_BFF_URL` | `http://localhost:3000` | Base URL of the workflow BFF |
+| `WORKFLOW_BFF_URL` | `http://localhost:8090` | Base URL of the workflow BFF |
 | `WORKFLOW_SESSION_COOKIE` | — | Value of the `session_id` cookie from a browser login session |
 
 To get a session cookie: log in to the workflow UI in your browser, open DevTools →
@@ -45,18 +45,19 @@ Application → Cookies, copy the value of `session_id`.
 
 ### `get_feature`
 
-Resolve a feature by its name.  Returns the feature's UUID, title, owner, and stage.
+Resolve a feature by its name.  Returns the feature's UUID, title, status, and stage.
 
 **Input:**
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `workspace_id` | string | yes | Workspace UUID |
 | `name` | string | yes | Exact feature name (e.g. `workflow-db`) |
 
-**Returns:** feature object with `id`, `name`, `title`, `owner`, `stage`.
+**Returns:** feature object with `id`, `feature_id`, `feature_name`, `title`, `status`, `current_stage`, `task_counts`, etc.
 
 **Errors:**
-- `404` — feature not found; check the name spelling
+- feature not found — check the name spelling
 - `401` — session expired; re-run `claude mcp add …` with a fresh cookie
 
 ### `create_tasks`
@@ -67,6 +68,7 @@ Bulk-create tasks for a go-owned feature in one all-or-nothing write.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `workspace_id` | string | yes | Workspace UUID |
 | `feature_id` | string | yes | UUID returned by `get_feature` |
 | `tasks` | array | yes | List of task objects (see below) |
 
@@ -134,8 +136,8 @@ stdin/stdout (stdio MCP transport)
     ▼
 McpServer (MCP TS SDK)
     │
-    ├── get_feature ──► GET  /api/features?name=<name>   (workflow-bff)
-    └── create_tasks ─► POST /api/features/:id/tasks     (workflow-bff)
+    ├── get_feature ──► GET  /bff/workflow-backend/api/workspaces/:ws_id/features?name=<name>   (workflow-bff)
+    └── create_tasks ─► POST /bff/workflow-backend/api/workspaces/:ws_id/features/:id/tasks    (workflow-bff)
 ```
 
 All requests carry `Cookie: session_id=<value>` from `WORKFLOW_SESSION_COOKIE`.
