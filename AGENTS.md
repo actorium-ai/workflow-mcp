@@ -35,6 +35,25 @@ create_tasks({
 // → { created: 2 }
 ```
 
+### `unblock_task`
+
+Unblock a blocked task. The resume state is derived server-side — no target choice needed.
+
+```
+unblock_task({
+  workspace_id: "550e8400-…",
+  feature: "executor-self-briefing",   // or UUID
+  task: "T3",                          // or UUID
+  note: "pushed the fixed image",      // optional
+})
+// success → { ok: true, from: "blocked", to: "ready" }
+// not blocked → { ok: false, reason: "task_not_blocked" }
+// wrong org → { ok: false, reason: "access_denied" }
+```
+
+`to` reflects where the server placed the task — `"ready"` (when blocked from `in_progress`)
+or `"in_review"` (when blocked from `reviewing`/`in_review`).
+
 ## Typical create-tasks flow
 
 ```
@@ -43,6 +62,14 @@ create_tasks({
 3. Parse tasks.md index table                  → task list
 4. create_tasks({ feature_id, tasks })         → { created: N }
 5. Done — orchestrator picks up ready tasks.
+```
+
+## Typical unblock-task flow
+
+```
+1. Human resolves the external blocker (e.g. fixes the failing image, rebases the branch).
+2. unblock_task({ workspace_id, feature: "<name>", task: "<name>", note: "<what was fixed>" })
+3. Check { ok, from, to } — orchestrator picks up the resumed task automatically.
 ```
 
 ## Auth
