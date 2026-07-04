@@ -3,6 +3,11 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { BffClient, BffRequestError } from './bffClient.js';
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isUuid(s: string): boolean {
+  return UUID_RE.test(s);
+}
+
 export interface Feature {
   id: string;
   feature_id: string;
@@ -126,6 +131,132 @@ export async function handleCreateTasks(
   }
 }
 
+export interface Task {
+  task_id: string;
+  task_name: string;
+  title: string;
+  status: string;
+}
+
+export interface TasksResponse {
+  success: boolean;
+  data: {
+    items: Task[];
+    total: number;
+    page: number;
+    limit: number;
+  };
+}
+
+export interface UnblockResponse {
+  task_id: string;
+  from: string;
+  to: string;
+}
+
+async function resolveFeatureUuid(
+  workspaceId: string,
+  feature: string,
+  bffClient: BffClient,
+): Promise<{ featureUuid: string } | { error: ToolResult }> {
+  if (isUuid(feature)) return { featureUuid: feature };
+
+  let response: FeaturesResponse;
+  try {
+    response = await bffClient.get<FeaturesResponse>(
+      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspaceId)}/features?name=${encodeURIComponent(feature)}`,
+    );
+  } catch (err) {
+    return { error: formatBffError(err) };
+  }
+
+  const features = response.data?.items ?? [];
+  if (features.length === 0) {
+    return {
+      error: {
+        content: [{ type: 'text', text: JSON.stringify({ ok: false, reason: `feature_not_found: "${feature}" in workspace ${workspaceId}` }) }],
+        isError: true,
+      },
+    };
+  }
+  return { featureUuid: features[0].id };
+}
+
+async function resolveTaskUuid(
+  workspaceId: string,
+  featureUuid: string,
+  task: string,
+  bffClient: BffClient,
+): Promise<{ taskUuid: string } | { error: ToolResult }> {
+  if (isUuid(task)) return { taskUuid: task };
+
+  let response: TasksResponse;
+  try {
+    response = await bffClient.get<TasksResponse>(
+      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspaceId)}/features/${encodeURIComponent(featureUuid)}/tasks?name=${encodeURIComponent(task)}`,
+    );
+  } catch (err) {
+    return { error: formatBffError(err) };
+  }
+
+  const tasks = response.data?.items ?? [];
+  if (tasks.length === 0) {
+    return {
+      error: {
+        content: [{ type: 'text', text: JSON.stringify({ ok: false, reason: `task_not_found: "${task}" in feature ${featureUuid}` }) }],
+        isError: true,
+      },
+    };
+  }
+  return { taskUuid: tasks[0].task_id };
+}
+
+export async function handleUnblockTask(
+  args: { workspace_id: string; feature: string; task: string; note?: string },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const { workspace_id, feature, task, note } = args;
+
+  const featureResult = await resolveFeatureUuid(workspace_id, feature, bffClient);
+  if ('error' in featureResult) return featureResult.error;
+
+  const taskResult = await resolveTaskUuid(workspace_id, featureResult.featureUuid, task, bffClient);
+  if ('error' in taskResult) return taskResult.error;
+
+  try {
+    const body: Record<string, string> = note !== undefined ? { note } : {};
+    const response = await bffClient.post<UnblockResponse>(
+      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/features/${encodeURIComponent(featureResult.featureUuid)}/tasks/${encodeURIComponent(taskResult.taskUuid)}/unblock`,
+      body,
+    );
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ ok: true, from: response.from, to: response.to }) }],
+    };
+  } catch (err) {
+    if (err instanceof BffRequestError) {
+      if (err.status === 409) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ ok: false, reason: 'task_not_blocked' }) }],
+          isError: true,
+        };
+      }
+      if (err.status === 404) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ ok: false, reason: 'task_not_found' }) }],
+          isError: true,
+        };
+      }
+      if (err.status === 403) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ ok: false, reason: 'access_denied' }) }],
+          isError: true,
+        };
+      }
+    }
+    return formatBffError(err);
+  }
+}
+
 export function registerTools(server: McpServer, bffClient: BffClient): void {
   server.tool(
     'get_feature',
@@ -159,5 +290,17 @@ export function registerTools(server: McpServer, bffClient: BffClient): void {
         .describe('Tasks to create (bulk, all-or-nothing)'),
     },
     (args) => handleCreateTasks(args, bffClient),
+  );
+
+  server.tool(
+    'unblock_task',
+    'Unblock a blocked workflow task. Resolves feature/task names to UUIDs, calls the unblock endpoint, and returns the server-derived resume state.',
+    {
+      workspace_id: z.string().describe('Workspace UUID'),
+      feature: z.string().describe('Feature name (slug) or UUID, e.g. "executor-self-briefing"'),
+      task: z.string().describe('Task name (e.g. "T3") or UUID'),
+      note: z.string().optional().describe('Optional note explaining what was done to resolve the block'),
+    },
+    (args) => handleUnblockTask(args, bffClient),
   );
 }

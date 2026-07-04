@@ -47,6 +47,7 @@ Application → Cookies, copy the value of `session_id`.
 
 Resolve a feature by its name.  Returns the feature's UUID, title, status, and stage.
 
+
 **Input:**
 
 | Field | Type | Required | Description |
@@ -110,6 +111,33 @@ When `create_tasks` returns a failure list:
 - `409` — tasks already exist (see failure list above)
 - `422` — invalid task definition; check required fields
 
+### `unblock_task`
+
+Unblock a blocked workflow task. Resolves feature/task names to UUIDs automatically, then calls
+the unblock endpoint. The resume state (e.g. `ready` or `in_review`) is derived server-side from
+`blocked_from_status` — no target choice is needed.
+
+**Input:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `workspace_id` | string | yes | Workspace UUID |
+| `feature` | string | yes | Feature name (slug) or UUID, e.g. `"executor-self-briefing"` |
+| `task` | string | yes | Task name (e.g. `"T3"`) or UUID |
+| `note` | string | no | Optional note explaining what was done to resolve the block |
+
+**Returns on success:** `{ ok: true, from: "blocked", to: "<resume-state>" }`
+
+**Returns on failure:** `{ ok: false, reason: "<code>" }` where `reason` is one of:
+- `task_not_blocked` — the task is not in `blocked` state (409 — already transitioned or lost race)
+- `task_not_found` — the task UUID does not exist (404)
+- `access_denied` — caller's org does not own the task (403)
+- `feature_not_found: "<name> in workspace <id>"` — feature name resolved to nothing
+- `task_not_found: "<name> in feature <id>"` — task name resolved to nothing
+
+**Errors:**
+- `401` — session expired; refresh the `WORKFLOW_SESSION_COOKIE`
+
 ## Create-tasks flow (for agents)
 
 1. The `tasks` stage must be approved before creating tasks.
@@ -136,8 +164,9 @@ stdin/stdout (stdio MCP transport)
     ▼
 McpServer (MCP TS SDK)
     │
-    ├── get_feature ──► GET  /bff/workflow-backend/api/workspaces/:ws_id/features?name=<name>   (workflow-bff)
-    └── create_tasks ─► POST /bff/workflow-backend/api/workspaces/:ws_id/features/:id/tasks    (workflow-bff)
+    ├── get_feature ──► GET  /bff/workflow-backend/api/workspaces/:ws_id/features?name=<name>                         (workflow-bff)
+    ├── create_tasks ─► POST /bff/workflow-backend/api/workspaces/:ws_id/features/:id/tasks                          (workflow-bff)
+    └── unblock_task ─► POST /bff/workflow-backend/api/workspaces/:ws_id/features/:feat_id/tasks/:task_id/unblock    (workflow-bff)
 ```
 
 All requests carry `Cookie: session_id=<value>` from `WORKFLOW_SESSION_COOKIE`.
