@@ -259,21 +259,6 @@ export async function handleUnblockTask(
 
 export type DocumentKind = 'product_spec' | 'technical_design' | 'tasks' | 'handoff';
 
-export interface StorageDocument {
-  id: string;
-  workspace_id: string;
-  feature_id: string;
-  kind: DocumentKind;
-  slug: string;
-  current_version_id: string | null;
-  created_at: string;
-  deleted_at: string | null;
-}
-
-export interface DocumentsListResponse {
-  documents: StorageDocument[];
-}
-
 export interface DocumentContentResponse {
   content: string;
 }

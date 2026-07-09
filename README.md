@@ -138,24 +138,6 @@ the unblock endpoint. The resume state (e.g. `ready` or `in_review`) is derived 
 **Errors:**
 - `401` — session expired; refresh the `WORKFLOW_SESSION_COOKIE`
 
-## Create-tasks flow (for agents)
-
-1. The `tasks` stage must be approved before creating tasks.
-2. Call `get_feature` with the exact feature name to obtain its `id`.
-3. Parse the `tasks.md` index table to build the task list (`actor_type` defaults to `agent`).
-4. Call `create_tasks` with the feature `id` and the full task list.
-5. On success: the backend's auto-ready logic marks no-dependency tasks `ready`.
-6. On conflict: follow the failure-list handling above.
-
-## Development
-
-```sh
-npm run build        # compile TypeScript → dist/
-npm run typecheck    # type-check without emitting
-npm run lint         # lint src/
-npm test             # run Jest tests
-```
-
 ### `read_storage_document`
 
 Read a `go`-owned feature's document content from `storage-service`. Scoped to `go`-owned features only — `ts`-owned feature documents remain git-backed and are unaffected by this tool.
@@ -192,6 +174,24 @@ Create or import a markdown document into `storage-service` for a `go`-owned fea
 **Errors:**
 - `401` — session expired; refresh the `WORKFLOW_SESSION_COOKIE`
 - `409` — a document of that kind already exists for the feature
+
+## Create-tasks flow (for agents)
+
+1. The `tasks` stage must be approved before creating tasks.
+2. Call `get_feature` with the exact feature name to obtain its `id`.
+3. Parse the `tasks.md` index table to build the task list (`actor_type` defaults to `agent`).
+4. Call `create_tasks` with the feature `id` and the full task list.
+5. On success: the backend's auto-ready logic marks no-dependency tasks `ready`.
+6. On conflict: follow the failure-list handling above.
+
+## Development
+
+```sh
+npm run build        # compile TypeScript → dist/
+npm run typecheck    # type-check without emitting
+npm run lint         # lint src/
+npm test             # run Jest tests
+```
 
 ## Architecture
 

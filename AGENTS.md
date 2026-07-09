@@ -54,24 +54,6 @@ unblock_task({
 `to` reflects where the server placed the task — `"ready"` (when blocked from `in_progress`)
 or `"in_review"` (when blocked from `reviewing`/`in_review`).
 
-## Typical create-tasks flow
-
-```
-1. Confirm the feature's tasks stage is approved.
-2. get_feature({ name: "<feature>" })          → feature.id
-3. Parse tasks.md index table                  → task list
-4. create_tasks({ feature_id, tasks })         → { created: N }
-5. Done — orchestrator picks up ready tasks.
-```
-
-## Typical unblock-task flow
-
-```
-1. Human resolves the external blocker (e.g. fixes the failing image, rebases the branch).
-2. unblock_task({ workspace_id, feature: "<name>", task: "<name>", note: "<what was fixed>" })
-3. Check { ok, from, to } — orchestrator picks up the resumed task automatically.
-```
-
 ### `read_storage_document`
 
 Read a `go`-owned feature's document from `storage-service`. Only applies to `go`-owned features.
@@ -98,6 +80,24 @@ write_storage_document({
   content:      "# Technical Design\n...",
 })
 // success → { ok: true, id: "770e8400-…", kind: "technical_design", slug: "technical-design" }
+```
+
+## Typical create-tasks flow
+
+```
+1. Confirm the feature's tasks stage is approved.
+2. get_feature({ name: "<feature>" })          → feature.id
+3. Parse tasks.md index table                  → task list
+4. create_tasks({ feature_id, tasks })         → { created: N }
+5. Done — orchestrator picks up ready tasks.
+```
+
+## Typical unblock-task flow
+
+```
+1. Human resolves the external blocker (e.g. fixes the failing image, rebases the branch).
+2. unblock_task({ workspace_id, feature: "<name>", task: "<name>", note: "<what was fixed>" })
+3. Check { ok, from, to } — orchestrator picks up the resumed task automatically.
 ```
 
 ## Storage document flow (go-owned features only)
