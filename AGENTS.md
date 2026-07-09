@@ -72,6 +72,45 @@ or `"in_review"` (when blocked from `reviewing`/`in_review`).
 3. Check { ok, from, to } — orchestrator picks up the resumed task automatically.
 ```
 
+### `read_storage_document`
+
+Read a `go`-owned feature's document from `storage-service`. Only applies to `go`-owned features.
+
+```
+read_storage_document({
+  workspace_id: "550e8400-…",
+  feature_id:   "660e8400-…",
+  kind:         "product_spec",   // "product_spec" | "technical_design" | "tasks" | "handoff"
+})
+// success → raw markdown string, e.g. "# Product Spec\n..."
+// not found → { ok: false, reason: "document_not_found: kind=\"product_spec\" in feature 660e8400-…" }
+```
+
+### `write_storage_document`
+
+Create or import a markdown document into `storage-service` for a `go`-owned feature.
+
+```
+write_storage_document({
+  workspace_id: "550e8400-…",
+  feature_id:   "660e8400-…",
+  kind:         "technical_design",
+  content:      "# Technical Design\n...",
+})
+// success → { ok: true, id: "770e8400-…", kind: "technical_design", slug: "technical-design" }
+```
+
+## Storage document flow (go-owned features only)
+
+```
+1. Obtain workspace_id and feature_id (e.g. via get_feature).
+2. write_storage_document({ workspace_id, feature_id, kind, content })   → creates the document.
+3. read_storage_document({ workspace_id, feature_id, kind })             → reads it back.
+```
+
+`ts`-owned features are unaffected — their documents live in git and are accessed via the
+Claude Code executor's standard clone-and-Read model.
+
 ## Auth
 
 Set `WORKFLOW_SESSION_COOKIE` to the `session_id` value from a browser login session:

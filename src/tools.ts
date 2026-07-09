@@ -257,6 +257,84 @@ export async function handleUnblockTask(
   }
 }
 
+export type DocumentKind = 'product_spec' | 'technical_design' | 'tasks' | 'handoff';
+
+export interface StorageDocument {
+  id: string;
+  workspace_id: string;
+  feature_id: string;
+  kind: DocumentKind;
+  slug: string;
+  current_version_id: string | null;
+  created_at: string;
+  deleted_at: string | null;
+}
+
+export interface DocumentsListResponse {
+  documents: StorageDocument[];
+}
+
+export interface DocumentContentResponse {
+  content: string;
+}
+
+export interface ImportDocumentResponse {
+  id: string;
+  kind: DocumentKind;
+  slug: string;
+}
+
+export async function handleReadStorageDocument(
+  args: { workspace_id: string; feature_id: string; kind: DocumentKind },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const { workspace_id, feature_id, kind } = args;
+  try {
+    const response = await bffClient.get<DocumentContentResponse>(
+      `/bff/storage-service/api/workspaces/${encodeURIComponent(workspace_id)}/features/${encodeURIComponent(feature_id)}/documents/${encodeURIComponent(kind)}/content`,
+    );
+    return {
+      content: [{ type: 'text', text: response.content }],
+    };
+  } catch (err) {
+    if (err instanceof BffRequestError && err.status === 404) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              ok: false,
+              reason: `document_not_found: kind="${kind}" in feature ${feature_id}`,
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+    return formatBffError(err);
+  }
+}
+
+export async function handleWriteStorageDocument(
+  args: { workspace_id: string; feature_id: string; kind: DocumentKind; content: string },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const { workspace_id, feature_id, kind, content } = args;
+  try {
+    const response = await bffClient.post<ImportDocumentResponse>(`/bff/storage-service/api/documents/import`, {
+      workspace_id,
+      feature_id,
+      kind,
+      content,
+    });
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ ok: true, id: response.id, kind: response.kind, slug: response.slug }) }],
+    };
+  } catch (err) {
+    return formatBffError(err);
+  }
+}
+
 export function registerTools(server: McpServer, bffClient: BffClient): void {
   server.tool(
     'get_feature',
@@ -302,5 +380,32 @@ export function registerTools(server: McpServer, bffClient: BffClient): void {
       note: z.string().optional().describe('Optional note explaining what was done to resolve the block'),
     },
     (args) => handleUnblockTask(args, bffClient),
+  );
+
+  server.tool(
+    'read_storage_document',
+    'Read a go-owned feature\'s document content from storage-service. Scoped to go-owned features only — ts-owned feature documents remain git-backed.',
+    {
+      workspace_id: z.string().describe('Workspace UUID'),
+      feature_id: z.string().describe('Feature UUID'),
+      kind: z
+        .enum(['product_spec', 'technical_design', 'tasks', 'handoff'])
+        .describe('Document kind to read'),
+    },
+    (args) => handleReadStorageDocument(args as { workspace_id: string; feature_id: string; kind: DocumentKind }, bffClient),
+  );
+
+  server.tool(
+    'write_storage_document',
+    'Create or import a markdown document into storage-service for a go-owned feature. Scoped to go-owned features only — ts-owned feature documents remain git-backed.',
+    {
+      workspace_id: z.string().describe('Workspace UUID'),
+      feature_id: z.string().describe('Feature UUID'),
+      kind: z
+        .enum(['product_spec', 'technical_design', 'tasks', 'handoff'])
+        .describe('Document kind to write'),
+      content: z.string().describe('Markdown content to import'),
+    },
+    (args) => handleWriteStorageDocument(args as { workspace_id: string; feature_id: string; kind: DocumentKind; content: string }, bffClient),
   );
 }

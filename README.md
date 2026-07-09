@@ -156,6 +156,43 @@ npm run lint         # lint src/
 npm test             # run Jest tests
 ```
 
+### `read_storage_document`
+
+Read a `go`-owned feature's document content from `storage-service`. Scoped to `go`-owned features only — `ts`-owned feature documents remain git-backed and are unaffected by this tool.
+
+**Input:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `workspace_id` | string | yes | Workspace UUID |
+| `feature_id` | string | yes | Feature UUID |
+| `kind` | `"product_spec"` \| `"technical_design"` \| `"tasks"` \| `"handoff"` | yes | Document kind to read |
+
+**Returns:** raw markdown content string.
+
+**Errors:**
+- `{ ok: false, reason: "document_not_found: ..." }` — no document of that kind exists for the feature
+- `401` — session expired; refresh the `WORKFLOW_SESSION_COOKIE`
+
+### `write_storage_document`
+
+Create or import a markdown document into `storage-service` for a `go`-owned feature. Scoped to `go`-owned features only — `ts`-owned feature documents remain git-backed.
+
+**Input:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `workspace_id` | string | yes | Workspace UUID |
+| `feature_id` | string | yes | Feature UUID |
+| `kind` | `"product_spec"` \| `"technical_design"` \| `"tasks"` \| `"handoff"` | yes | Document kind to write |
+| `content` | string | yes | Markdown content to import |
+
+**Returns:** `{ ok: true, id: "<doc-uuid>", kind: "<kind>", slug: "<slug>" }`
+
+**Errors:**
+- `401` — session expired; refresh the `WORKFLOW_SESSION_COOKIE`
+- `409` — a document of that kind already exists for the feature
+
 ## Architecture
 
 ```
@@ -164,9 +201,11 @@ stdin/stdout (stdio MCP transport)
     ▼
 McpServer (MCP TS SDK)
     │
-    ├── get_feature ──► GET  /bff/workflow-backend/api/workspaces/:ws_id/features?name=<name>                         (workflow-bff)
-    ├── create_tasks ─► POST /bff/workflow-backend/api/workspaces/:ws_id/features/:id/tasks                          (workflow-bff)
-    └── unblock_task ─► POST /bff/workflow-backend/api/workspaces/:ws_id/features/:feat_id/tasks/:task_id/unblock    (workflow-bff)
+    ├── get_feature ──────────────► GET  /bff/workflow-backend/api/workspaces/:ws_id/features?name=<name>                                               (workflow-bff → workflow-backend)
+    ├── create_tasks ─────────────► POST /bff/workflow-backend/api/workspaces/:ws_id/features/:id/tasks                                                 (workflow-bff → workflow-backend)
+    ├── unblock_task ─────────────► POST /bff/workflow-backend/api/workspaces/:ws_id/features/:feat_id/tasks/:task_id/unblock                           (workflow-bff → workflow-backend)
+    ├── read_storage_document ────► GET  /bff/storage-service/api/workspaces/:ws_id/features/:feat_id/documents/:kind/content                           (workflow-bff → storage-service)
+    └── write_storage_document ───► POST /bff/storage-service/api/documents/import                                                                      (workflow-bff → storage-service)
 ```
 
 All requests carry `Cookie: session_id=<value>` from `WORKFLOW_SESSION_COOKIE`.

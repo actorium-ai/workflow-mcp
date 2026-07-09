@@ -3,6 +3,8 @@ import {
   handleGetFeature,
   handleCreateTasks,
   handleUnblockTask,
+  handleReadStorageDocument,
+  handleWriteStorageDocument,
   Feature,
   FeaturesResponse,
   CreateTasksResponse,
@@ -11,6 +13,9 @@ import {
   Task,
   TasksResponse,
   UnblockResponse,
+  DocumentContentResponse,
+  ImportDocumentResponse,
+  DocumentKind,
   ToolResult,
 } from './tools';
 
@@ -436,5 +441,151 @@ describe('handleUnblockTask', () => {
 
     expect(result?.isError).toBe(true);
     expect(firstText(result)).toContain('500');
+  });
+});
+
+describe('handleReadStorageDocument', () => {
+  const WS = 'ws-uuid-1';
+  const FID = 'feat-uuid-1';
+  const KIND: DocumentKind = 'product_spec';
+
+  it('returns document content on success', async () => {
+    const client = makeClient();
+    const resp: DocumentContentResponse = { content: '# Product Spec\nHello' };
+    client.get = jest.fn().mockResolvedValueOnce(resp);
+
+    const result = await handleReadStorageDocument({ workspace_id: WS, feature_id: FID, kind: KIND }, client);
+
+    expect(result?.isError).toBeFalsy();
+    expect(firstText(result)).toBe('# Product Spec\nHello');
+  });
+
+  it('calls the correct storage-service endpoint', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce({ content: '' } as DocumentContentResponse);
+
+    await handleReadStorageDocument({ workspace_id: WS, feature_id: FID, kind: KIND }, client);
+
+    expect(client.get).toHaveBeenCalledWith(
+      `/bff/storage-service/api/workspaces/${WS}/features/${FID}/documents/${KIND}/content`,
+    );
+  });
+
+  it('encodes special characters in workspace_id and feature_id', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce({ content: '' } as DocumentContentResponse);
+
+    await handleReadStorageDocument({ workspace_id: 'ws/1', feature_id: 'feat id', kind: KIND }, client);
+
+    expect(client.get).toHaveBeenCalledWith(expect.stringContaining('ws%2F1'));
+    expect(client.get).toHaveBeenCalledWith(expect.stringContaining('feat%20id'));
+  });
+
+  it('returns document_not_found on 404', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockRejectedValueOnce(
+      new BffRequestError('BFF request failed: 404 Not Found', 404, {}),
+    );
+
+    const result = await handleReadStorageDocument({ workspace_id: WS, feature_id: FID, kind: KIND }, client);
+
+    expect(result?.isError).toBe(true);
+    const body = JSON.parse(firstText(result));
+    expect(body.ok).toBe(false);
+    expect(body.reason).toMatch(/document_not_found/);
+    expect(body.reason).toContain(KIND);
+  });
+
+  it('returns auth error on BffAuthError', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockRejectedValueOnce(
+      new BffAuthError('Authentication failed (401). Please log in again and update WORKFLOW_SESSION_COOKIE'),
+    );
+
+    const result = await handleReadStorageDocument({ workspace_id: WS, feature_id: FID, kind: KIND }, client);
+
+    expect(result?.isError).toBe(true);
+    expect(firstText(result)).toContain('Authentication failed');
+  });
+
+  it('returns error on unexpected 500', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockRejectedValueOnce(
+      new BffRequestError('BFF request failed: 500 Internal Server Error', 500, undefined),
+    );
+
+    const result = await handleReadStorageDocument({ workspace_id: WS, feature_id: FID, kind: KIND }, client);
+
+    expect(result?.isError).toBe(true);
+    expect(firstText(result)).toContain('500');
+  });
+});
+
+describe('handleWriteStorageDocument', () => {
+  const WS = 'ws-uuid-1';
+  const FID = 'feat-uuid-1';
+  const KIND: DocumentKind = 'technical_design';
+  const CONTENT = '# Technical Design\nContent here';
+
+  it('returns ok with id/kind/slug on success', async () => {
+    const client = makeClient();
+    const resp: ImportDocumentResponse = { id: 'doc-uuid-1', kind: KIND, slug: 'technical-design' };
+    client.post = jest.fn().mockResolvedValueOnce(resp);
+
+    const result = await handleWriteStorageDocument({ workspace_id: WS, feature_id: FID, kind: KIND, content: CONTENT }, client);
+
+    expect(result?.isError).toBeFalsy();
+    const body = JSON.parse(firstText(result));
+    expect(body).toEqual({ ok: true, id: 'doc-uuid-1', kind: KIND, slug: 'technical-design' });
+  });
+
+  it('calls the correct import endpoint with all required fields', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockResolvedValueOnce({ id: 'doc-uuid-1', kind: KIND, slug: 'technical-design' } as ImportDocumentResponse);
+
+    await handleWriteStorageDocument({ workspace_id: WS, feature_id: FID, kind: KIND, content: CONTENT }, client);
+
+    expect(client.post).toHaveBeenCalledWith('/bff/storage-service/api/documents/import', {
+      workspace_id: WS,
+      feature_id: FID,
+      kind: KIND,
+      content: CONTENT,
+    });
+  });
+
+  it('returns auth error on BffAuthError', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockRejectedValueOnce(
+      new BffAuthError('Authentication failed (401). Please log in again and update WORKFLOW_SESSION_COOKIE'),
+    );
+
+    const result = await handleWriteStorageDocument({ workspace_id: WS, feature_id: FID, kind: KIND, content: CONTENT }, client);
+
+    expect(result?.isError).toBe(true);
+    expect(firstText(result)).toContain('Authentication failed');
+  });
+
+  it('returns error on unexpected 500', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockRejectedValueOnce(
+      new BffRequestError('BFF request failed: 500 Internal Server Error', 500, undefined),
+    );
+
+    const result = await handleWriteStorageDocument({ workspace_id: WS, feature_id: FID, kind: KIND, content: CONTENT }, client);
+
+    expect(result?.isError).toBe(true);
+    expect(firstText(result)).toContain('500');
+  });
+
+  it('returns error on 409 conflict', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockRejectedValueOnce(
+      new BffRequestError('BFF request failed: 409 Conflict', 409, { error: 'document already exists' }),
+    );
+
+    const result = await handleWriteStorageDocument({ workspace_id: WS, feature_id: FID, kind: KIND, content: CONTENT }, client);
+
+    expect(result?.isError).toBe(true);
+    expect(firstText(result)).toContain('409');
   });
 });
