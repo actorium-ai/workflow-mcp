@@ -21,6 +21,19 @@ This compiles TypeScript to `dist/` and symlinks the `workflow-mcp` binary onto 
 
 ## Configure with Claude (local scope)
 
+**Recommended — scoped tokens:**
+
+```sh
+claude mcp add workflow-mcp \
+  --scope local \
+  --env WORKFLOW_BFF_URL=http://localhost:8090 \
+  --env WORKFLOW_READ_TOKEN=<read-scoped-token> \
+  --env WORKFLOW_WRITE_TOKEN=<write-scoped-token> \
+  -- workflow-mcp
+```
+
+**Legacy — single session cookie (backward compatible):**
+
 ```sh
 claude mcp add workflow-mcp \
   --scope local \
@@ -36,10 +49,30 @@ The `install.sh` script in the parent `workflow` repo runs this command for you.
 | Variable | Default | Description |
 |---|---|---|
 | `WORKFLOW_BFF_URL` | `http://localhost:8090` | Base URL of the workflow BFF |
-| `WORKFLOW_SESSION_COOKIE` | — | Value of the `session_id` cookie from a browser login session |
+| `WORKFLOW_READ_TOKEN` | — | Token scoped to GET (read) operations. Falls back to `WORKFLOW_SESSION_COOKIE`. |
+| `WORKFLOW_WRITE_TOKEN` | — | Token scoped to POST/PUT/DELETE (mutation) operations. Falls back to `WORKFLOW_SESSION_COOKIE`. |
+| `WORKFLOW_SESSION_COOKIE` | — | **(Deprecated)** Single session cookie used for all requests. Use scoped tokens above when possible. |
 
-To get a session cookie: log in to the workflow UI in your browser, open DevTools →
-Application → Cookies, copy the value of `session_id`.
+### Getting tokens
+
+**Scoped tokens (recommended):** Call `POST /api/me/tokens` on the BFF while authenticated to
+receive a `read_token` and `write_token` pair. These tokens enforce access boundaries at the BFF:
+read tokens are rejected for mutation endpoints, preventing a compromised read tool from making
+write calls.
+
+**Legacy session cookie:** Log in to the workflow UI in your browser, open DevTools →
+Application → Cookies, copy the value of `session_id`. This single value grants both read and
+write access.
+
+### Token selection logic
+
+`BffClient` selects the cookie sent with each request based on the HTTP method:
+
+- **GET** requests → `WORKFLOW_READ_TOKEN` (falls back to `WORKFLOW_SESSION_COOKIE`)
+- **POST / PUT / PATCH / DELETE** requests → `WORKFLOW_WRITE_TOKEN` (falls back to `WORKFLOW_SESSION_COOKIE`)
+
+If a mutation is attempted and neither `WORKFLOW_WRITE_TOKEN` nor `WORKFLOW_SESSION_COOKIE` is
+set, the client throws a `BffMissingWriteTokenError` with instructions to configure `WORKFLOW_WRITE_TOKEN`.
 
 ## Tools
 
@@ -169,5 +202,6 @@ McpServer (MCP TS SDK)
     └── unblock_task ─► POST /bff/workflow-backend/api/workspaces/:ws_id/features/:feat_id/tasks/:task_id/unblock    (workflow-bff)
 ```
 
-All requests carry `Cookie: session_id=<value>` from `WORKFLOW_SESSION_COOKIE`.
+Read requests carry `Cookie: session_id=<read_token>` from `WORKFLOW_READ_TOKEN` (or fallback `WORKFLOW_SESSION_COOKIE`).
+Mutation requests carry `Cookie: session_id=<write_token>` from `WORKFLOW_WRITE_TOKEN` (or fallback `WORKFLOW_SESSION_COOKIE`).
 No DB credentials are held by this server.

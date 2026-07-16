@@ -5,6 +5,8 @@ describe('createServer', () => {
   const config: Config = {
     bffUrl: 'http://localhost:8090',
     sessionCookie: undefined,
+    readToken: undefined,
+    writeToken: undefined,
   };
 
   it('returns an McpServer instance', () => {

@@ -9,7 +9,7 @@ export function createServer(config: Config): McpServer {
     version: '0.1.0',
   });
 
-  const bffClient = new BffClient(config.bffUrl, config.sessionCookie);
+  const bffClient = new BffClient(config.bffUrl, config.sessionCookie, config.readToken, config.writeToken);
   registerTools(server, bffClient);
 
   return server;
