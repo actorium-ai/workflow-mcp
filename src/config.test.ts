@@ -34,4 +34,38 @@ describe('loadConfig', () => {
     const config = loadConfig();
     expect(config.sessionCookie).toBe('abc123');
   });
+
+  it('returns undefined readToken when WORKFLOW_READ_TOKEN is not set', () => {
+    delete process.env.WORKFLOW_READ_TOKEN;
+    const config = loadConfig();
+    expect(config.readToken).toBeUndefined();
+  });
+
+  it('returns readToken from env when WORKFLOW_READ_TOKEN is set', () => {
+    process.env.WORKFLOW_READ_TOKEN = 'read-tok-abc';
+    const config = loadConfig();
+    expect(config.readToken).toBe('read-tok-abc');
+  });
+
+  it('returns undefined writeToken when WORKFLOW_WRITE_TOKEN is not set', () => {
+    delete process.env.WORKFLOW_WRITE_TOKEN;
+    const config = loadConfig();
+    expect(config.writeToken).toBeUndefined();
+  });
+
+  it('returns writeToken from env when WORKFLOW_WRITE_TOKEN is set', () => {
+    process.env.WORKFLOW_WRITE_TOKEN = 'write-tok-xyz';
+    const config = loadConfig();
+    expect(config.writeToken).toBe('write-tok-xyz');
+  });
+
+  it('returns all three token types independently', () => {
+    process.env.WORKFLOW_SESSION_COOKIE = 'legacy-cookie';
+    process.env.WORKFLOW_READ_TOKEN = 'read-tok';
+    process.env.WORKFLOW_WRITE_TOKEN = 'write-tok';
+    const config = loadConfig();
+    expect(config.sessionCookie).toBe('legacy-cookie');
+    expect(config.readToken).toBe('read-tok');
+    expect(config.writeToken).toBe('write-tok');
+  });
 });
