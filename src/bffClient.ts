@@ -18,11 +18,14 @@ export class BffRequestError extends Error {
 
 export class BffClient {
   private readonly bffUrl: string;
-  private readonly sessionCookie: string | undefined;
+  /** Bearer JWT — from WORKFLOW_TOKEN or the shared credential file (see
+   * authFile.ts). There's no read/write split to enforce — every tool this
+   * server exposes is a GET. */
+  private readonly bearerToken: string | undefined;
 
-  constructor(bffUrl: string, sessionCookie: string | undefined) {
+  constructor(bffUrl: string, bearerToken?: string) {
     this.bffUrl = bffUrl.replace(/\/$/, '');
-    this.sessionCookie = sessionCookie;
+    this.bearerToken = bearerToken;
   }
 
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -32,17 +35,16 @@ export class BffClient {
       ...(init.headers as Record<string, string> | undefined),
     };
 
-    if (this.sessionCookie) {
-      headers['Cookie'] = `session_id=${this.sessionCookie}`;
+    if (this.bearerToken) {
+      headers['Authorization'] = `Bearer ${this.bearerToken}`;
     }
 
     const response = await fetch(url, { ...init, headers });
 
     if (response.status === 401) {
       throw new BffAuthError(
-        'Authentication failed (401). Your session cookie has expired or is invalid. ' +
-          'Please log in again at the BFF URL and update the WORKFLOW_SESSION_COOKIE ' +
-          'environment variable in your mcpServers configuration with the new session_id cookie value.',
+        'Authentication failed (401). Your Actorium session has expired. ' +
+          'Run "Actorium: Connect" in VS Code to reconnect, then retry.',
       );
     }
 
@@ -66,12 +68,5 @@ export class BffClient {
 
   async get<T>(path: string): Promise<T> {
     return this.request<T>(path, { method: 'GET' });
-  }
-
-  async post<T>(path: string, body: unknown): Promise<T> {
-    return this.request<T>(path, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    });
   }
 }

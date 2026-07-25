@@ -1,108 +1,122 @@
-# workflow-mcp — Agent Usage Guide
+# actorium-mcp — Agent Usage Guide
 
-This MCP server lets agents create tasks for go-owned workflow features through the
-workflow BFF API. It exposes two tools: `get_feature` and `create_tasks`.
+Read-only MCP server giving agents full context on the workflow platform: features (with
+bundled docs/tasks/activity), tasks (PR diffs, review threads, execution info), documents, and
+caller identity. No mutation tools — nothing here changes state.
 
 ## Prerequisites
 
-1. The `workflow-mcp` binary is on your PATH (`npm link` after `npm run build`).
-2. `WORKFLOW_BFF_URL` is set (or defaults to `http://localhost:8090`).
-3. `WORKFLOW_SESSION_COOKIE` is set to a valid `session_id` cookie value.
+1. The `actorium-mcp` binary is on your PATH (`pnpm link --global` after `pnpm run build`).
+2. `API_URL` is set (or defaults to `http://localhost:8090`).
+3. Auth is resolved automatically if you're signed in to the Actorium VS Code extension —
+   see Auth below. Otherwise set `WORKFLOW_TOKEN`.
+
+All tools below take an optional `workspace_id` (`list_workspaces` takes `org_id` instead) —
+omit it to use the resolved default (see "Default workspace/org resolution" under Auth below).
 
 ## Tools
 
-### `get_feature`
+### `get_feature` — the main entry point
 
-Resolve a feature by name before creating its tasks.
+Resolve a feature by name and get everything about it in one call.
 
 ```
 get_feature({ name: "workflow-db" })
-// → { id: "550e8400-…", name: "workflow-db", title: "…", owner: "go", stage: "tasks" }
+// → { id, feature_name, title, status, current_stage, owner, workspace_id,
+//     task_counts, documents: [...], tasks: [...], activity: [...] (capped at 50), source_state }
 ```
 
-### `create_tasks`
-
-Create all tasks for a feature in one bulk call.
+### `list_workspaces` / `search_features` / `search_tasks`
 
 ```
-create_tasks({
-  feature_id: "550e8400-…",
-  tasks: [
-    { id: "T1", title: "Schema migration", repo: "workflow-backend", actor_type: "agent", depends_on: [] },
-    { id: "T2", title: "Read API",         repo: "workflow-backend", actor_type: "agent", depends_on: ["T1"] },
-  ]
-})
-// → { created: 2 }
+list_workspaces({ org_id })                                          → workspace summaries
+search_features({ workspace_id, status?, title?, include_tasks?, limit? })   → paged feature list (limit default 50, max 1000)
+search_tasks({ workspace_id, feature_id?, status?, repo?, limit? })          → paged task list (workspace-wide if feature_id omitted; limit default 50, max 1000)
 ```
 
-### `unblock_task`
-
-Unblock a blocked task. The resume state is derived server-side — no target choice needed.
+### `get_task` / `get_task_diff` / `get_task_review_thread`
 
 ```
-unblock_task({
-  workspace_id: "550e8400-…",
-  feature: "executor-self-briefing",   // or UUID
-  task: "T3",                          // or UUID
-  note: "pushed the fixed image",      // optional
-})
-// success → { ok: true, from: "blocked", to: "ready" }
-// not blocked → { ok: false, reason: "task_not_blocked" }
-// wrong org → { ok: false, reason: "access_denied" }
+get_task({ task_id })              → execution info, both PR refs, per-task activity (capped at 50), depends_on
+get_task_diff({ task_id, repo?, files_only? })
+// → PR file list + unified diff (empty if no PR yet); size-capped, truncated:true if cut
+// files_only:true skips the diff/patch content entirely (just filenames + stats)
+get_task_review_thread({ task_id, repo? })
+// → reviews + review comments + issue comments, chronological; capped at 200 items, 5000
+//   bytes/body, truncated:true if cut
 ```
 
-`to` reflects where the server placed the task — `"ready"` (when blocked from `in_progress`)
-or `"in_review"` (when blocked from `reviewing`/`in_review`).
-
-## Typical create-tasks flow
+### `get_feature_handoff` / `list_workspace_activity` / `list_workspace_repos`
 
 ```
-1. Confirm the feature's tasks stage is approved.
-2. get_feature({ name: "<feature>" })          → feature.id
-3. Parse tasks.md index table                  → task list
-4. create_tasks({ feature_id, tasks })         → { created: N }
-5. Done — orchestrator picks up ready tasks.
+get_feature_handoff({ feature_id })    → go-owned features only; 404 if none/not go-owned
+list_workspace_activity({ feature_id?, task_id?, audience?, page?, limit? })
+// → audit trail; audience: "client" | "internal"; paginated, default limit 50, max 1000
+list_workspace_repos({ workspace_id }) → repo id/url/default branch/tags, which is the management repo
 ```
 
-## Typical unblock-task flow
+### `read_storage_document` / `list_workspace_documents` / `get_document_versions`
 
 ```
-1. Human resolves the external blocker (e.g. fixes the failing image, rebases the branch).
-2. unblock_task({ workspace_id, feature: "<name>", task: "<name>", note: "<what was fixed>" })
-3. Check { ok, from, to } — orchestrator picks up the resumed task automatically.
+read_storage_document({ feature_id, kind })
+// kind: "product_spec" | "technical_design" | "tasks" | "handoff" — go-owned features only
+// success → raw markdown string
+// not found → { ok: false, reason: "document_not_found: kind=\"product_spec\" in feature ..." }
+
+list_workspace_documents({ feature_id?, limit? })
+// → { documents: [...], truncated } — metadata only (id, path, created_at), no content;
+//   limit default 500, max 2000
+get_document_versions({ document_id, limit? })
+// → { versions: [...], truncated } — edit history, newest first (author is a raw user UUID);
+//   limit default 200, max 1000
+```
+
+`ts`-owned features' documents remain git-backed and are unaffected by these tools — access them
+via the Claude Code executor's standard clone-and-Read model instead.
+
+### `whoami`
+
+No params. Returns the caller's profile + org memberships + platform roles — sanity-check your
+auth/org scope before calling workspace-scoped tools.
+
+## Typical "understand this feature" flow
+
+```
+1. get_feature({ name: "<feature>" })         → status, docs, tasks, activity — all in one call
+2. get_task({ task_id })                       → per-task PR refs + execution detail
+3. get_task_diff / get_task_review_thread      → what changed, what feedback it's gotten
+4. read_storage_document({ feature_id, kind }) → the actual spec/design/tasks content
 ```
 
 ## Auth
 
-Set `WORKFLOW_SESSION_COOKIE` to the `session_id` value from a browser login session:
+No manual setup needed if you're signed in to the **Actorium VS Code extension** — it writes a
+shared credential file (`~/.actorium/auth.json`) on connect/switch-workspace/disconnect, and this
+server reads it automatically (sent as `Authorization: Bearer`).
 
-1. Log in to the workflow UI.
-2. DevTools → Application → Cookies → copy `session_id` value.
-3. Re-register: `claude mcp add workflow-mcp --scope local --env WORKFLOW_SESSION_COOKIE=<value> -- workflow-mcp`
+A `401` response means that token expired — run **Actorium: Connect** in VS Code to refresh it.
 
-A `401` response means the session has expired — repeat step 3.
+Without the extension (headless/CI), set `WORKFLOW_TOKEN` to a bearer JWT instead:
+`claude mcp add actorium-mcp --scope local --env WORKFLOW_TOKEN=<jwt> -- actorium-mcp`.
+There's no read/write token split — every tool here is a GET.
 
-## Conflict / failure-list handling
+### Default workspace/org resolution
 
-If `create_tasks` returns a `failures` array:
+`workspace_id`/`org_id` fall back in this order when a tool call omits them:
 
-```json
-{
-  "error": "some tasks already exist",
-  "failures": [{ "id": "T1", "reason": "already exists" }]
-}
-```
+1. **The workspace manifest** — `.actorium/workspace.json`, written by the extension at a linked
+   workspace folder's root. This server walks upward from its own cwd looking for it, so it
+   resolves the workspace it's running for directly from the folder it's in — correct even with
+   multiple VS Code windows open on different workspaces at once.
+2. Otherwise, the shared credential file's stored `workspace_id`/`org_id` — a single machine-wide
+   "last selected" value, only a reasonable default when running from outside any linked
+   workspace folder.
 
-Options:
-- **Stop** — abort and surface failures for manual resolution.
-- **Retry** — resolve conflicts (e.g. delete existing tasks), then retry the full batch.
-- **Skip-failing-and-retry-rest** — re-call `create_tasks` with only the non-failing tasks.
-
-Always show the full failure list to the user before deciding.
+An explicit `workspace_id`/`org_id` argument always wins over both.
 
 ## Configuration reference
 
-| Env var | Default | Purpose |
-|---|---|---|
-| `WORKFLOW_BFF_URL` | `http://localhost:8090` | BFF base URL |
-| `WORKFLOW_SESSION_COOKIE` | — | `session_id` cookie value |
+| Env var | Default | Purpose                                           |
+|---|---|---------------------------------------------------|
+| `API_URL` | `http://localhost:8090` | API URL                                           |
+| `WORKFLOW_TOKEN` | — | Bearer JWT — overrides the shared credential file |

@@ -4,7 +4,6 @@ import { Config } from './config';
 describe('createServer', () => {
   const config: Config = {
     bffUrl: 'http://localhost:8090',
-    sessionCookie: undefined,
   };
 
   it('returns an McpServer instance', () => {

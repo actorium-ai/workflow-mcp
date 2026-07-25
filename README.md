@@ -1,160 +1,227 @@
-# workflow-mcp
+# actorium-mcp
 
-MCP server for the [workflow](https://github.com/tiendv89/agent-workflow) task-creation API.
-Exposes two tools — `get_feature` and `create_tasks` — over stdio, authenticated via a
-`session_id` browser cookie obtained from the BFF.
+Read-only MCP server for Actorium.
+Gives a coding agent full context on features, tasks, PRs, activity, documents, and identity —
+no mutation tools, so it's safe to hand to any agent that only needs to *understand* a workspace,
+not change it.
 
 ## Requirements
 
 - Node.js 18+
-- Access to a running `workflow-bff` instance
+- Access to a running `actorium` instance
 
 ## Install
 
 ```sh
-npm install
-npm run build
-npm link
+npm install -g @actorium-ai/actorium-mcp
 ```
 
-This compiles TypeScript to `dist/` and symlinks the `workflow-mcp` binary onto your `PATH`.
+Run `actorium-mcp --version` (or `-v`) to check what's installed — prints the installed
+package's version and exits immediately, without starting the MCP server. The Actorium VS
+Code extension uses this to detect whether the CLI is installed and to compare it against the
+backend's minimum supported version.
 
-## Configure with Claude (local scope)
+### Default workspace/org resolution
 
-```sh
-claude mcp add workflow-mcp \
-  --scope local \
-  --env WORKFLOW_BFF_URL=http://localhost:8090 \
-  --env WORKFLOW_SESSION_COOKIE=<your-session-id> \
-  -- workflow-mcp
-```
+Every tool's optional `workspace_id` (and `list_workspaces`'s `org_id`) falls back to a default
+when omitted, resolved in this order:
 
-The `install.sh` script in the parent `workflow` repo runs this command for you.
+1. **The workspace manifest** — `.actorium/workspace.json`, written by the extension at a linked
+   workspace folder's root (alongside AGENTS.md). actorium-mcp walks upward from its own working
+   directory looking for this file, so it resolves the workspace it's running for directly from
+   the folder it's in. This is what makes it safe to have **multiple VS Code windows open on
+   different workspaces at once** — each one's actorium-mcp process (and its coding agent's
+   terminal) still resolves to the correct workspace, regardless of what any other window is doing.
+2. Otherwise, the shared credential file's stored `workspace_id`/`org_id` — a single machine-wide
+   "last selected" value, so it's only a reasonable default when actorium-mcp is running from
+   somewhere outside any linked workspace folder (or the manifest hasn't been written yet).
+
+An explicit `workspace_id`/`org_id` argument on the tool call always wins over both.
 
 ## Environment variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `WORKFLOW_BFF_URL` | `http://localhost:8090` | Base URL of the workflow BFF |
-| `WORKFLOW_SESSION_COOKIE` | — | Value of the `session_id` cookie from a browser login session |
-
-To get a session cookie: log in to the workflow UI in your browser, open DevTools →
-Application → Cookies, copy the value of `session_id`.
+| `API_URL` | `http://localhost:8090` | Base URL of the workflow BFF |
+| `WORKFLOW_TOKEN` | — | Bearer JWT — overrides the shared credential file |
 
 ## Tools
 
 ### `get_feature`
 
-Resolve a feature by its name.  Returns the feature's UUID, title, status, and stage.
-
-
-**Input:**
+Resolve a feature by name. Returns the **full** feature detail in one call — status/stage,
+documents, tasks, activity timeline, and sync state — not just a bare summary. The embedded
+activity timeline is capped at the 50 most recent events — use `list_workspace_activity` for
+the full history.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `workspace_id` | string | yes | Workspace UUID |
+| `workspace_id` | string | no | Workspace UUID |
 | `name` | string | yes | Exact feature name (e.g. `workflow-db`) |
 
-**Returns:** feature object with `id`, `feature_id`, `feature_name`, `title`, `status`, `current_stage`, `task_counts`, etc.
+**Errors:** feature not found (name mismatch) · `401` — reconnect via `Actorium: Connect` or refresh your token/cookie.
 
-**Errors:**
-- feature not found — check the name spelling
-- `401` — session expired; re-run `claude mcp add …` with a fresh cookie
+### `list_workspaces`
 
-### `create_tasks`
-
-Bulk-create tasks for a go-owned feature in one all-or-nothing write.
-
-**Input:**
+List every workspace in an organization.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `workspace_id` | string | yes | Workspace UUID |
-| `feature_id` | string | yes | UUID returned by `get_feature` |
-| `tasks` | array | yes | List of task objects (see below) |
+| `org_id` | string | no | Organization UUID |
 
-Each task object:
+### `search_features`
 
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `id` | string | yes | Task ID (e.g. `T1`) |
-| `title` | string | yes | Short task title |
-| `repo` | string | yes | Repo ID from `workspace.yaml` |
-| `actor_type` | `"agent"` \| `"human"` \| `"either"` | yes | Who executes the task |
-| `depends_on` | string[] | yes | IDs of prerequisite tasks (`[]` if none) |
-
-**Returns:** `{ created: number }` on success.
-
-**Conflict / failure list:**
-If one or more tasks already exist, the entire batch is rejected and the response
-includes a `failures` array:
-
-```json
-{
-  "error": "some tasks already exist",
-  "failures": [
-    { "id": "T1", "reason": "already exists" }
-  ]
-}
-```
-
-When `create_tasks` returns a failure list:
-1. Show the full list to the user.
-2. Ask: **stop / retry (fix the conflicts first) / skip-failing-and-retry-rest**.
-3. If **skip-failing-and-retry-rest**: re-call `create_tasks` with the non-failing subset.
-4. If **retry**: the user must resolve the conflicts (e.g. delete duplicate tasks), then retry.
-5. If **stop**: abort and surface the failures for manual resolution.
-
-**Errors:**
-- `401` — session expired; refresh the cookie
-- `404` — feature not found; verify `feature_id`
-- `409` — tasks already exist (see failure list above)
-- `422` — invalid task definition; check required fields
-
-### `unblock_task`
-
-Unblock a blocked workflow task. Resolves feature/task names to UUIDs automatically, then calls
-the unblock endpoint. The resume state (e.g. `ready` or `in_review`) is derived server-side from
-`blocked_from_status` — no target choice is needed.
-
-**Input:**
+Search/list features in a workspace. Set `include_tasks` to embed each feature's task list and
+avoid N+1 `get_task` calls. `limit` defaults to 50 and is capped at 1000 server-side if omitted
+or exceeded.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `workspace_id` | string | yes | Workspace UUID |
-| `feature` | string | yes | Feature name (slug) or UUID, e.g. `"executor-self-briefing"` |
-| `task` | string | yes | Task name (e.g. `"T3"`) or UUID |
-| `note` | string | no | Optional note explaining what was done to resolve the block |
+| `workspace_id` | string | no | Workspace UUID |
+| `status` | string | no | Filter by feature status |
+| `title` | string | no | Filter by title substring |
+| `sort` | string | no | Sort order (server-defined field names) |
+| `page` / `limit` | number | no | Pagination |
+| `include_tasks` | boolean | no | Embed each feature's tasks |
 
-**Returns on success:** `{ ok: true, from: "blocked", to: "<resume-state>" }`
+### `search_tasks`
 
-**Returns on failure:** `{ ok: false, reason: "<code>" }` where `reason` is one of:
-- `task_not_blocked` — the task is not in `blocked` state (409 — already transitioned or lost race)
-- `task_not_found` — the task UUID does not exist (404)
-- `access_denied` — caller's org does not own the task (403)
-- `feature_not_found: "<name> in workspace <id>"` — feature name resolved to nothing
-- `task_not_found: "<name> in feature <id>"` — task name resolved to nothing
+Search/list tasks — across the whole workspace, or scoped to one feature via `feature_id`.
+`limit` defaults to 50 and is capped at 1000 server-side if omitted or exceeded.
 
-**Errors:**
-- `401` — session expired; refresh the `WORKFLOW_SESSION_COOKIE`
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `workspace_id` | string | no | Workspace UUID |
+| `feature_id` | string | no | Restrict to one feature (omit for workspace-wide) |
+| `task_id`, `title`, `status`, `repo` | string | no | Filters |
+| `sort`, `page`, `limit` | — | no | Sort/pagination |
 
-## Create-tasks flow (for agents)
+### `get_task`
 
-1. The `tasks` stage must be approved before creating tasks.
-2. Call `get_feature` with the exact feature name to obtain its `id`.
-3. Parse the `tasks.md` index table to build the task list (`actor_type` defaults to `agent`).
-4. Call `create_tasks` with the feature `id` and the full task list.
-5. On success: the backend's auto-ready logic marks no-dependency tasks `ready`.
-6. On conflict: follow the failure-list handling above.
+Full task detail: execution info (actor, last update), both PR refs (implementation +
+workspace/handoff), a per-task activity timeline (capped at the 50 most recent events), and
+dependency names.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `workspace_id` | string | no | Workspace UUID |
+| `task_id` | string | yes | Task UUID (from `search_tasks`/`get_feature`) |
+
+**Errors:** `{ ok: false, reason: "task_not_found: ..." }` on 404.
+
+### `get_task_diff`
+
+A task's PR file list + unified diff (GitHub-backed, via workflow-backend). Empty (not an error)
+if the task has no PR yet. Large diffs are size-capped server-side (file count, per-file patch,
+and the unified diff itself) — the response includes `truncated: true` when a cap was hit.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `workspace_id` | string | no | Workspace UUID |
+| `task_id` | string | yes | Task UUID |
+| `repo` | string | no | Which of the task's repos to diff (defaults to the implementation PR) |
+| `files_only` | boolean | no | Skip the unified diff and per-file patches — just filenames + add/delete stats |
+
+### `get_task_review_thread`
+
+A task's PR reviews, review comments, and issue comments merged into one chronological feed.
+Capped at the 200 most recent items with each item's body capped at 5000 bytes — the response
+includes `truncated: true` when a cap was hit.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `workspace_id` | string | no | Workspace UUID |
+| `task_id` | string | yes | Task UUID |
+| `repo` | string | no | Which of the task's repos to read (defaults to the implementation PR) |
+
+### `get_feature_handoff`
+
+A go-owned feature's handoff state — the multi-repo final-PR fan-out as it nears completion.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `workspace_id` | string | no | Workspace UUID |
+| `feature_id` | string | yes | Feature UUID |
+
+**Errors:** `{ ok: false, reason: "handoff_not_found: ..." }` if the feature isn't go-owned or has no handoff yet.
+
+### `list_workspace_activity`
+
+The audit/activity feed for a workspace, optionally filtered to one feature or task.
+`audience: "client"` filters to a curated, human-friendly action set; omit for the full internal
+feed (raw action codes, not all actor names resolved yet). Paginated — defaults to the 50 most
+recent events, max 1000 per page.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `workspace_id` | string | no | Workspace UUID |
+| `feature_id` / `task_id` | string | no | Restrict to one feature/task |
+| `audience` | `"internal"` \| `"client"` | no | Filter action verbosity |
+| `page` | number | no | Page number, 1-indexed (default 1) |
+| `limit` | number | no | Page size (default 50, max 1000) |
+
+### `list_workspace_repos`
+
+Every repo registered in a workspace — id, url, default branch, whether it's the management repo,
+and its tags.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `workspace_id` | string | no | Workspace UUID |
+
+### `read_storage_document`
+
+Read a go-owned feature's document content from storage-service. Scoped to go-owned features
+only — ts-owned feature documents remain git-backed.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `workspace_id` | string | no | Workspace UUID |
+| `feature_id` | string | yes | Feature UUID |
+| `kind` | `"product_spec"` \| `"technical_design"` \| `"tasks"` \| `"handoff"` | yes | Document kind to read |
+
+**Errors:** `{ ok: false, reason: "document_not_found: ..." }` on 404.
+
+### `list_workspace_documents`
+
+List every document's metadata (id, path, `created_at`, `current_version_id`) in a workspace, or
+in one feature via `feature_id`. No content — use `read_storage_document` for that. Response is
+`{ documents: [...], truncated: boolean }` — defaults to at most 500 documents (max 2000).
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `workspace_id` | string | no | Workspace UUID |
+| `feature_id` | string | no | Restrict to one feature (omit for workspace-wide) |
+| `limit` | number | no | Max documents to return (default 500, max 2000) |
+
+### `get_document_versions`
+
+A document's edit history, newest first — `source` (edit/import/migration/restore) and timestamp
+per version. Note: `author` is a raw user UUID, not a resolved display name. Response is
+`{ versions: [...], truncated: boolean }` — defaults to at most 200 versions (max 1000).
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `document_id` | string | yes | Document UUID (from `list_workspace_documents`) |
+| `limit` | number | no | Max versions to return (default 200, max 1000) |
+
+### `whoami`
+
+The authenticated caller's identity — profile, org memberships, and platform roles. No
+`workspace_id`/`org_id` params. Useful for sanity-checking auth/org scope before calling
+workspace-scoped tools.
 
 ## Development
 
 ```sh
-npm run build        # compile TypeScript → dist/
-npm run typecheck    # type-check without emitting
-npm run lint         # lint src/
-npm test             # run Jest tests
+pnpm run build        # compile TypeScript → dist/
+pnpm run typecheck    # type-check without emitting
+pnpm run lint         # lint src/
+pnpm test             # run Jest tests
 ```
+
+Or via `make` (see the `Makefile`): `make build` / `make typecheck` / `make lint` / `make test` /
+`make run` (build + run the compiled server) / `make link` (build + `pnpm link --global`).
 
 ## Architecture
 
@@ -164,10 +231,24 @@ stdin/stdout (stdio MCP transport)
     ▼
 McpServer (MCP TS SDK)
     │
-    ├── get_feature ──► GET  /bff/workflow-backend/api/workspaces/:ws_id/features?name=<name>                         (workflow-bff)
-    ├── create_tasks ─► POST /bff/workflow-backend/api/workspaces/:ws_id/features/:id/tasks                          (workflow-bff)
-    └── unblock_task ─► POST /bff/workflow-backend/api/workspaces/:ws_id/features/:feat_id/tasks/:task_id/unblock    (workflow-bff)
+    ├── get_feature 
+    ├── list_workspaces 
+    ├── search_features 
+    ├── search_tasks 
+    ├── get_task 
+    ├── get_task_diff 
+    ├── get_task_review_thread 
+    ├── get_feature_handoff 
+    ├── list_workspace_activity
+    ├── list_workspace_repos 
+    ├── read_storage_document 
+    ├── list_workspace_documents
+    ├── get_document_versions 
+    └── whoami 
 ```
 
-All requests carry `Cookie: session_id=<value>` from `WORKFLOW_SESSION_COOKIE`.
-No DB credentials are held by this server.
+When a bearer token is configured (`WORKFLOW_TOKEN` or the shared credential file), every request
+carries `Authorization: Bearer <token>`. No DB credentials are held by this server, and
+org/workspace access control is enforced entirely server-side (`workflow-bff`/`workflow-backend`
+resolve the caller's accessible orgs from the token on every request) — this server never
+bypasses it.

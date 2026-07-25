@@ -1,16 +1,26 @@
 import { BffClient, BffAuthError, BffRequestError } from './bffClient';
 import {
   handleGetFeature,
-  handleCreateTasks,
-  handleUnblockTask,
+  handleListWorkspaces,
+  handleSearchFeatures,
+  handleSearchTasks,
+  handleGetTask,
+  handleGetTaskDiff,
+  handleGetTaskReviewThread,
+  handleGetFeatureHandoff,
+  handleListWorkspaceActivity,
+  handleListWorkspaceRepos,
+  handleReadStorageDocument,
+  handleListWorkspaceDocuments,
+  handleGetDocumentVersions,
+  handleWhoami,
+  resolveWorkspaceId,
+  resolveOrgId,
   Feature,
   FeaturesResponse,
-  CreateTasksResponse,
-  TaskFailure,
-  TaskInput,
-  Task,
-  TasksResponse,
-  UnblockResponse,
+  FeatureDetailResponse,
+  DocumentContentResponse,
+  DocumentKind,
   ToolResult,
 } from './tools';
 
@@ -21,8 +31,6 @@ jest.mock('./bffClient', () => {
     BffRequestError: actual.BffRequestError,
     BffClient: jest.fn().mockImplementation(() => ({
       get: jest.fn(),
-      post: jest.fn(),
-      request: jest.fn(),
     })),
   };
 });
@@ -37,6 +45,12 @@ function firstText(result: ToolResult): string {
   return item.text;
 }
 
+const AUTH_ERROR = new BffAuthError(
+  'Authentication failed (401). Your Actorium session has expired. ' +
+    'Run "Actorium: Connect" in VS Code to reconnect, then retry.',
+);
+const SERVER_ERROR = new BffRequestError('BFF request failed: 500 Internal Server Error', 500, undefined);
+
 describe('handleGetFeature', () => {
   const feature: Feature = {
     id: 'uuid-1',
@@ -46,395 +60,504 @@ describe('handleGetFeature', () => {
     status: 'in_implementation',
     current_stage: 'tasks',
   };
+  const detail: FeatureDetailResponse = {
+    success: true,
+    data: {
+      id: 'uuid-1',
+      feature_name: 'my-feature',
+      title: 'My Feature',
+      status: 'in_implementation',
+      current_stage: 'tasks',
+      workspace_id: 'ws-1',
+      tasks: [{ id: 't1' }],
+      activity: [{ action: 'created' }],
+      documents: [],
+      source_state: { stale: false },
+    },
+  };
 
-  it('returns the feature JSON when found', async () => {
+  function searchResponse(items: Feature[]): FeaturesResponse {
+    return { success: true, data: { items, total: items.length, page: 1, limit: 10 } };
+  }
+
+  it('resolves the feature by name then calls the detail endpoint', async () => {
     const client = makeClient();
-    client.get = jest.fn().mockResolvedValueOnce({ success: true, data: { items: [feature], total: 1, page: 1, limit: 0 } } as FeaturesResponse);
+    client.get = jest.fn().mockResolvedValueOnce(searchResponse([feature])).mockResolvedValueOnce(detail);
 
     const result = await handleGetFeature({ workspace_id: 'ws-1', name: 'my-feature' }, client);
 
-    expect(result?.isError).toBeFalsy();
-    expect(firstText(result)).toContain('my-feature');
-    expect(firstText(result)).toContain('uuid-1');
+    expect(result.isError).toBeFalsy();
+    expect(client.get).toHaveBeenNthCalledWith(
+      1,
+      '/bff/workflow-backend/api/workspaces/ws-1/features?name=my-feature',
+    );
+    expect(client.get).toHaveBeenNthCalledWith(
+      2,
+      '/bff/workflow-backend/api/workspaces/ws-1/features/uuid-1',
+    );
   });
 
-  it('calls the correct BFF endpoint', async () => {
+  it('returns the bundled detail (tasks/activity/documents/source_state) in the response', async () => {
     const client = makeClient();
-    client.get = jest.fn().mockResolvedValueOnce({ success: true, data: { items: [feature], total: 1, page: 1, limit: 0 } } as FeaturesResponse);
+    client.get = jest.fn().mockResolvedValueOnce(searchResponse([feature])).mockResolvedValueOnce(detail);
 
-    await handleGetFeature({ workspace_id: 'ws-1', name: 'my-feature' }, client);
+    const result = await handleGetFeature({ workspace_id: 'ws-1', name: 'my-feature' }, client);
 
-    expect(client.get).toHaveBeenCalledWith('/bff/workflow-backend/api/workspaces/ws-1/features?name=my-feature');
+    const body = JSON.parse(firstText(result));
+    expect(body.tasks).toEqual([{ id: 't1' }]);
+    expect(body.activity).toEqual([{ action: 'created' }]);
+    expect(body.source_state).toEqual({ stale: false });
   });
 
-  it('encodes special characters in workspace_id and name', async () => {
+  it('returns not-found message when the search returns no features', async () => {
     const client = makeClient();
-    client.get = jest.fn().mockResolvedValueOnce({ success: true, data: { items: [feature], total: 1, page: 1, limit: 0 } } as FeaturesResponse);
-
-    await handleGetFeature({ workspace_id: 'ws/1', name: 'my feature' }, client);
-
-    expect(client.get).toHaveBeenCalledWith('/bff/workflow-backend/api/workspaces/ws%2F1/features?name=my%20feature');
-  });
-
-  it('returns not-found message when features array is empty', async () => {
-    const client = makeClient();
-    client.get = jest.fn().mockResolvedValueOnce({ success: true, data: { items: [], total: 0, page: 1, limit: 0 } } as FeaturesResponse);
+    client.get = jest.fn().mockResolvedValueOnce(searchResponse([]));
 
     const result = await handleGetFeature({ workspace_id: 'ws-1', name: 'missing' }, client);
 
-    expect(result?.isError).toBeFalsy();
-    expect(firstText(result)).toMatch(/not found/i);
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toMatch(/feature_not_found/i);
     expect(firstText(result)).toContain('missing');
   });
 
   it('returns error with re-auth guidance on BffAuthError', async () => {
     const client = makeClient();
-    client.get = jest.fn().mockRejectedValueOnce(
-      new BffAuthError('Authentication failed (401). Please log in again and update WORKFLOW_SESSION_COOKIE'),
-    );
+    client.get = jest.fn().mockRejectedValueOnce(AUTH_ERROR);
 
     const result = await handleGetFeature({ workspace_id: 'ws-1', name: 'my-feature' }, client);
 
-    expect(result?.isError).toBe(true);
+    expect(result.isError).toBe(true);
     expect(firstText(result)).toContain('Authentication failed');
+  });
+});
+
+describe('handleListWorkspaces', () => {
+  it('calls the correct endpoint and relays the data array', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce({ success: true, data: [{ id: 'ws-1' }] });
+
+    const result = await handleListWorkspaces({ org_id: 'org-1' }, client);
+
+    expect(client.get).toHaveBeenCalledWith('/bff/workflow-backend/api/workspaces?org=org-1');
+    expect(JSON.parse(firstText(result))).toEqual([{ id: 'ws-1' }]);
   });
 
   it('returns error on unexpected BFF failure', async () => {
     const client = makeClient();
-    client.get = jest.fn().mockRejectedValueOnce(
-      new BffRequestError('BFF request failed: 500 Internal Server Error', 500, undefined),
-    );
+    client.get = jest.fn().mockRejectedValueOnce(SERVER_ERROR);
 
-    const result = await handleGetFeature({ workspace_id: 'ws-1', name: 'my-feature' }, client);
-
-    expect(result?.isError).toBe(true);
-    expect(firstText(result)).toContain('500');
+    const result = await handleListWorkspaces({ org_id: 'org-1' }, client);
+    expect(result.isError).toBe(true);
   });
 });
 
-describe('handleCreateTasks', () => {
-  const tasks: TaskInput[] = [
-    { name: 'T1', title: 'Task One', repo: 'workflow-backend', depends_on: [] },
-    { name: 'T2', title: 'Task Two', repo: 'workflow-backend', depends_on: ['T1'], actor_type: 'agent' },
-  ];
-
-  it('returns created tasks JSON on success', async () => {
+describe('handleSearchFeatures', () => {
+  it('builds the query string from provided filters', async () => {
     const client = makeClient();
-    const response: CreateTasksResponse = {
-      tasks: [
-        { task_id: 'uuid-t1', task_name: 'T1', title: 'Task One', status: 'ready' },
-        { task_id: 'uuid-t2', task_name: 'T2', title: 'Task Two', status: 'todo' },
-      ],
-    };
-    client.post = jest.fn().mockResolvedValueOnce(response);
+    client.get = jest.fn().mockResolvedValueOnce({ success: true, data: { items: [] } });
 
-    const result = await handleCreateTasks({ workspace_id: 'ws-1', feature_id: 'feat-uuid-1', tasks }, client);
-
-    expect(result?.isError).toBeFalsy();
-    expect(firstText(result)).toContain('T1');
-    expect(firstText(result)).toContain('uuid-t1');
-  });
-
-  it('calls the correct BFF endpoint with the tasks body', async () => {
-    const client = makeClient();
-    client.post = jest.fn().mockResolvedValueOnce({ tasks: [] } as CreateTasksResponse);
-
-    await handleCreateTasks({ workspace_id: 'ws-1', feature_id: 'feat-uuid-1', tasks }, client);
-
-    expect(client.post).toHaveBeenCalledWith('/bff/workflow-backend/api/workspaces/ws-1/features/feat-uuid-1/tasks', { tasks });
-  });
-
-  it('returns failure list on 422 with array body', async () => {
-    const client = makeClient();
-    const failures: TaskFailure[] = [{ name: 'T1', reason: 'task already exists' }];
-    client.post = jest.fn().mockRejectedValueOnce(
-      new BffRequestError('BFF request failed: 422 Unprocessable Entity', 422, failures),
+    await handleSearchFeatures(
+      { workspace_id: 'ws-1', status: 'in_progress', include_tasks: true, page: 2, limit: 20 },
+      client,
     );
 
-    const result = await handleCreateTasks({ workspace_id: 'ws-1', feature_id: 'feat-uuid-1', tasks }, client);
-
-    expect(result?.isError).toBe(true);
-    expect(firstText(result)).toContain('T1');
-    expect(firstText(result)).toContain('task already exists');
+    const [url] = (client.get as jest.Mock).mock.calls[0];
+    expect(url).toContain('/workspaces/ws-1/features?');
+    expect(url).toContain('status=in_progress');
+    expect(url).toContain('include=tasks');
+    expect(url).toContain('page=2');
+    expect(url).toContain('limit=20');
   });
 
-  it('returns failure list on 409 with failures-wrapped body', async () => {
+  it('omits the query string entirely when no filters are given', async () => {
     const client = makeClient();
-    const failures: TaskFailure[] = [{ name: 'T2', reason: 'duplicate task name' }];
-    client.post = jest.fn().mockRejectedValueOnce(
-      new BffRequestError('BFF request failed: 409 Conflict', 409, { failures }),
-    );
+    client.get = jest.fn().mockResolvedValueOnce({ success: true, data: { items: [] } });
 
-    const result = await handleCreateTasks({ workspace_id: 'ws-1', feature_id: 'feat-uuid-1', tasks }, client);
+    await handleSearchFeatures({ workspace_id: 'ws-1' }, client);
 
-    expect(result?.isError).toBe(true);
-    expect(firstText(result)).toContain('T2');
-    expect(firstText(result)).toContain('duplicate task name');
-  });
-
-  it('returns auth error with re-auth guidance on BffAuthError', async () => {
-    const client = makeClient();
-    client.post = jest.fn().mockRejectedValueOnce(
-      new BffAuthError('Authentication failed (401). Please log in again and update WORKFLOW_SESSION_COOKIE'),
-    );
-
-    const result = await handleCreateTasks({ workspace_id: 'ws-1', feature_id: 'feat-uuid-1', tasks }, client);
-
-    expect(result?.isError).toBe(true);
-    expect(firstText(result)).toContain('Authentication failed');
-  });
-
-  it('returns error on unexpected 500', async () => {
-    const client = makeClient();
-    client.post = jest.fn().mockRejectedValueOnce(
-      new BffRequestError('BFF request failed: 500 Internal Server Error', 500, undefined),
-    );
-
-    const result = await handleCreateTasks({ workspace_id: 'ws-1', feature_id: 'feat-uuid-1', tasks }, client);
-
-    expect(result?.isError).toBe(true);
-    expect(firstText(result)).toContain('500');
+    expect(client.get).toHaveBeenCalledWith('/bff/workflow-backend/api/workspaces/ws-1/features');
   });
 });
 
-describe('handleUnblockTask', () => {
-  const FEAT_UUID = '550e8400-e29b-41d4-a716-446655440000';
-  const TASK_UUID = '660e8400-e29b-41d4-a716-446655440001';
-
-  const feature: Feature = {
-    id: FEAT_UUID,
-    feature_id: 'my-feature',
-    feature_name: 'my-feature',
-    title: 'My Feature',
-    status: 'in_implementation',
-    current_stage: 'tasks',
-  };
-
-  const task: Task = {
-    task_id: TASK_UUID,
-    task_name: 'T3',
-    title: 'Task Three',
-    status: 'blocked',
-  };
-
-  function makeFeatureResponse(items: Feature[]): FeaturesResponse {
-    return { success: true, data: { items, total: items.length, page: 1, limit: 10 } };
-  }
-
-  function makeTasksResponse(items: Task[]): TasksResponse {
-    return { success: true, data: { items, total: items.length, page: 1, limit: 10 } };
-  }
-
-  it('resolves feature name and task name then calls unblock endpoint', async () => {
+describe('handleSearchTasks', () => {
+  it('hits the feature-scoped route when feature_id is given', async () => {
     const client = makeClient();
-    client.get = jest.fn()
-      .mockResolvedValueOnce(makeFeatureResponse([feature]))
-      .mockResolvedValueOnce(makeTasksResponse([task]));
-    const unblockResp: UnblockResponse = { task_id: TASK_UUID, from: 'blocked', to: 'ready' };
-    client.post = jest.fn().mockResolvedValueOnce(unblockResp);
+    client.get = jest.fn().mockResolvedValueOnce({ success: true, data: { items: [] } });
 
-    const result = await handleUnblockTask({ workspace_id: 'ws-1', feature: 'my-feature', task: 'T3' }, client);
+    await handleSearchTasks({ workspace_id: 'ws-1', feature_id: 'feat-1', status: 'blocked' }, client);
 
-    expect(result?.isError).toBeFalsy();
-    const body = JSON.parse(firstText(result));
-    expect(body).toEqual({ ok: true, from: 'blocked', to: 'ready' });
-  });
-
-  it('skips feature resolution when feature is already a UUID', async () => {
-    const client = makeClient();
-    client.get = jest.fn().mockResolvedValueOnce(makeTasksResponse([task]));
-    const unblockResp: UnblockResponse = { task_id: TASK_UUID, from: 'blocked', to: 'ready' };
-    client.post = jest.fn().mockResolvedValueOnce(unblockResp);
-
-    const result = await handleUnblockTask({ workspace_id: 'ws-1', feature: FEAT_UUID, task: 'T3' }, client);
-
-    expect(result?.isError).toBeFalsy();
-    expect(client.get).toHaveBeenCalledTimes(1);
-    expect(client.get).toHaveBeenCalledWith(expect.stringContaining('/tasks?name=T3'));
-  });
-
-  it('skips task resolution when task is already a UUID', async () => {
-    const client = makeClient();
-    client.get = jest.fn().mockResolvedValueOnce(makeFeatureResponse([feature]));
-    const unblockResp: UnblockResponse = { task_id: TASK_UUID, from: 'blocked', to: 'in_review' };
-    client.post = jest.fn().mockResolvedValueOnce(unblockResp);
-
-    const result = await handleUnblockTask({ workspace_id: 'ws-1', feature: 'my-feature', task: TASK_UUID }, client);
-
-    expect(result?.isError).toBeFalsy();
-    expect(client.get).toHaveBeenCalledTimes(1);
-    expect(client.post).toHaveBeenCalledWith(expect.stringContaining(TASK_UUID), expect.anything());
-  });
-
-  it('skips both resolutions when both are UUIDs', async () => {
-    const client = makeClient();
-    const unblockResp: UnblockResponse = { task_id: TASK_UUID, from: 'blocked', to: 'ready' };
-    client.post = jest.fn().mockResolvedValueOnce(unblockResp);
-
-    const result = await handleUnblockTask({ workspace_id: 'ws-1', feature: FEAT_UUID, task: TASK_UUID }, client);
-
-    expect(result?.isError).toBeFalsy();
-    expect(client.get).not.toHaveBeenCalled();
-  });
-
-  it('calls the correct unblock endpoint URL', async () => {
-    const client = makeClient();
-    client.get = jest.fn()
-      .mockResolvedValueOnce(makeFeatureResponse([feature]))
-      .mockResolvedValueOnce(makeTasksResponse([task]));
-    const unblockResp: UnblockResponse = { task_id: TASK_UUID, from: 'blocked', to: 'ready' };
-    client.post = jest.fn().mockResolvedValueOnce(unblockResp);
-
-    await handleUnblockTask({ workspace_id: 'ws-1', feature: 'my-feature', task: 'T3' }, client);
-
-    expect(client.post).toHaveBeenCalledWith(
-      `/bff/workflow-backend/api/workspaces/ws-1/features/${FEAT_UUID}/tasks/${TASK_UUID}/unblock`,
-      {},
+    expect(client.get).toHaveBeenCalledWith(
+      '/bff/workflow-backend/api/workspaces/ws-1/features/feat-1/tasks?status=blocked',
     );
   });
 
-  it('passes note in the request body when provided', async () => {
+  it('hits the workspace-wide route when feature_id is omitted', async () => {
     const client = makeClient();
-    client.get = jest.fn()
-      .mockResolvedValueOnce(makeFeatureResponse([feature]))
-      .mockResolvedValueOnce(makeTasksResponse([task]));
-    const unblockResp: UnblockResponse = { task_id: TASK_UUID, from: 'blocked', to: 'ready' };
-    client.post = jest.fn().mockResolvedValueOnce(unblockResp);
+    client.get = jest.fn().mockResolvedValueOnce({ success: true, data: { items: [] } });
 
-    await handleUnblockTask({ workspace_id: 'ws-1', feature: 'my-feature', task: 'T3', note: 'fixed the thing' }, client);
+    await handleSearchTasks({ workspace_id: 'ws-1', repo: 'workflow-backend' }, client);
 
-    expect(client.post).toHaveBeenCalledWith(expect.any(String), { note: 'fixed the thing' });
+    expect(client.get).toHaveBeenCalledWith(
+      '/bff/workflow-backend/api/workspaces/ws-1/tasks?repo=workflow-backend',
+    );
+  });
+});
+
+describe('handleGetTask', () => {
+  it('calls the workspace-scoped task-detail endpoint', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce({ success: true, data: { id: 'task-1' } });
+
+    const result = await handleGetTask({ workspace_id: 'ws-1', task_id: 'task-1' }, client);
+
+    expect(client.get).toHaveBeenCalledWith('/bff/workflow-backend/api/workspaces/ws-1/tasks/task-1');
+    expect(result.isError).toBeFalsy();
   });
 
-  it('encodes special characters in workspace_id and UUIDs', async () => {
+  it('returns task_not_found on 404', async () => {
     const client = makeClient();
-    client.get = jest.fn()
-      .mockResolvedValueOnce(makeFeatureResponse([feature]))
-      .mockResolvedValueOnce(makeTasksResponse([task]));
-    const unblockResp: UnblockResponse = { task_id: TASK_UUID, from: 'blocked', to: 'ready' };
-    client.post = jest.fn().mockResolvedValueOnce(unblockResp);
+    client.get = jest.fn().mockRejectedValueOnce(new BffRequestError('404', 404, {}));
 
-    await handleUnblockTask({ workspace_id: 'ws/1', feature: 'my feature', task: 'T3' }, client);
+    const result = await handleGetTask({ workspace_id: 'ws-1', task_id: 'missing' }, client);
 
-    expect(client.get).toHaveBeenNthCalledWith(1, expect.stringContaining('ws%2F1'));
-    expect(client.get).toHaveBeenNthCalledWith(1, expect.stringContaining('my%20feature'));
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toMatch(/task_not_found/);
+  });
+});
+
+describe('handleGetTaskDiff / handleGetTaskReviewThread', () => {
+  it('get_task_diff includes repo in the query string when given', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce({ files: [] });
+
+    await handleGetTaskDiff({ workspace_id: 'ws-1', task_id: 'task-1', repo: 'backend' }, client);
+
+    expect(client.get).toHaveBeenCalledWith(
+      '/bff/workflow-backend/api/workspaces/ws-1/tasks/task-1/diff?repo=backend',
+    );
   });
 
-  it('returns feature_not_found when feature name resolves to empty list', async () => {
+  it('get_task_diff omits the query string when repo is not given', async () => {
     const client = makeClient();
-    client.get = jest.fn().mockResolvedValueOnce(makeFeatureResponse([]));
+    client.get = jest.fn().mockResolvedValueOnce({ files: [] });
 
-    const result = await handleUnblockTask({ workspace_id: 'ws-1', feature: 'missing-feat', task: 'T3' }, client);
+    await handleGetTaskDiff({ workspace_id: 'ws-1', task_id: 'task-1' }, client);
 
-    expect(result?.isError).toBe(true);
-    const body = JSON.parse(firstText(result));
-    expect(body.ok).toBe(false);
-    expect(body.reason).toMatch(/feature_not_found/);
-    expect(body.reason).toContain('missing-feat');
+    expect(client.get).toHaveBeenCalledWith(
+      '/bff/workflow-backend/api/workspaces/ws-1/tasks/task-1/diff',
+    );
   });
 
-  it('returns task_not_found when task name resolves to empty list', async () => {
+  it('get_task_diff appends files_only=true when requested', async () => {
     const client = makeClient();
-    client.get = jest.fn()
-      .mockResolvedValueOnce(makeFeatureResponse([feature]))
-      .mockResolvedValueOnce(makeTasksResponse([]));
+    client.get = jest.fn().mockResolvedValueOnce({ files: [] });
 
-    const result = await handleUnblockTask({ workspace_id: 'ws-1', feature: 'my-feature', task: 'T99' }, client);
-
-    expect(result?.isError).toBe(true);
-    const body = JSON.parse(firstText(result));
-    expect(body.ok).toBe(false);
-    expect(body.reason).toMatch(/task_not_found/);
-    expect(body.reason).toContain('T99');
-  });
-
-  it('returns task_not_blocked on 409 from unblock endpoint', async () => {
-    const client = makeClient();
-    client.get = jest.fn()
-      .mockResolvedValueOnce(makeFeatureResponse([feature]))
-      .mockResolvedValueOnce(makeTasksResponse([task]));
-    client.post = jest.fn().mockRejectedValueOnce(
-      new BffRequestError('BFF request failed: 409 Conflict', 409, {}),
+    await handleGetTaskDiff(
+      { workspace_id: 'ws-1', task_id: 'task-1', files_only: true },
+      client,
     );
 
-    const result = await handleUnblockTask({ workspace_id: 'ws-1', feature: 'my-feature', task: 'T3' }, client);
-
-    expect(result?.isError).toBe(true);
-    const body = JSON.parse(firstText(result));
-    expect(body).toEqual({ ok: false, reason: 'task_not_blocked' });
+    expect(client.get).toHaveBeenCalledWith(
+      '/bff/workflow-backend/api/workspaces/ws-1/tasks/task-1/diff?files_only=true',
+    );
   });
 
-  it('returns task_not_found on 404 from unblock endpoint', async () => {
+  it('get_task_diff combines repo and files_only in the query string', async () => {
     const client = makeClient();
-    client.get = jest.fn()
-      .mockResolvedValueOnce(makeFeatureResponse([feature]))
-      .mockResolvedValueOnce(makeTasksResponse([task]));
-    client.post = jest.fn().mockRejectedValueOnce(
-      new BffRequestError('BFF request failed: 404 Not Found', 404, {}),
+    client.get = jest.fn().mockResolvedValueOnce({ files: [] });
+
+    await handleGetTaskDiff(
+      { workspace_id: 'ws-1', task_id: 'task-1', repo: 'backend', files_only: true },
+      client,
     );
 
-    const result = await handleUnblockTask({ workspace_id: 'ws-1', feature: 'my-feature', task: 'T3' }, client);
-
-    expect(result?.isError).toBe(true);
-    const body = JSON.parse(firstText(result));
-    expect(body).toEqual({ ok: false, reason: 'task_not_found' });
+    const [url] = (client.get as jest.Mock).mock.calls[0];
+    expect(url).toContain('repo=backend');
+    expect(url).toContain('files_only=true');
   });
 
-  it('returns access_denied on 403 from unblock endpoint', async () => {
+  it('get_task_review_thread calls the review-thread endpoint', async () => {
     const client = makeClient();
-    client.get = jest.fn()
-      .mockResolvedValueOnce(makeFeatureResponse([feature]))
-      .mockResolvedValueOnce(makeTasksResponse([task]));
-    client.post = jest.fn().mockRejectedValueOnce(
-      new BffRequestError('BFF request failed: 403 Forbidden', 403, {}),
+    client.get = jest.fn().mockResolvedValueOnce({ items: [] });
+
+    await handleGetTaskReviewThread({ workspace_id: 'ws-1', task_id: 'task-1' }, client);
+
+    expect(client.get).toHaveBeenCalledWith(
+      '/bff/workflow-backend/api/workspaces/ws-1/tasks/task-1/review-thread',
     );
+  });
+});
 
-    const result = await handleUnblockTask({ workspace_id: 'ws-1', feature: 'my-feature', task: 'T3' }, client);
+describe('handleGetFeatureHandoff', () => {
+  it('calls the handoff endpoint', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce({ created_at: '2026-01-01', prs: [] });
 
-    expect(result?.isError).toBe(true);
-    const body = JSON.parse(firstText(result));
-    expect(body).toEqual({ ok: false, reason: 'access_denied' });
+    await handleGetFeatureHandoff({ workspace_id: 'ws-1', feature_id: 'feat-1' }, client);
+
+    expect(client.get).toHaveBeenCalledWith(
+      '/bff/workflow-backend/api/workspaces/ws-1/features/feat-1/handoff',
+    );
   });
 
-  it('returns auth error on BffAuthError during feature resolution', async () => {
+  it('returns a handoff_not_found reason on 404', async () => {
     const client = makeClient();
-    client.get = jest.fn().mockRejectedValueOnce(
-      new BffAuthError('Authentication failed (401). Please log in again and update WORKFLOW_SESSION_COOKIE'),
+    client.get = jest.fn().mockRejectedValueOnce(new BffRequestError('404', 404, {}));
+
+    const result = await handleGetFeatureHandoff({ workspace_id: 'ws-1', feature_id: 'feat-1' }, client);
+
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toMatch(/handoff_not_found/);
+  });
+});
+
+describe('handleListWorkspaceActivity', () => {
+  it('builds the query string from feature_id/task_id/audience', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce([]);
+
+    await handleListWorkspaceActivity(
+      { workspace_id: 'ws-1', feature_id: 'feat-1', task_id: 'task-1', audience: 'client' },
+      client,
     );
 
-    const result = await handleUnblockTask({ workspace_id: 'ws-1', feature: 'my-feature', task: 'T3' }, client);
+    const [url] = (client.get as jest.Mock).mock.calls[0];
+    expect(url).toContain('featureId=feat-1');
+    expect(url).toContain('taskId=task-1');
+    expect(url).toContain('audience=client');
+  });
 
-    expect(result?.isError).toBe(true);
+  it('appends page/limit to the query string when given', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce([]);
+
+    await handleListWorkspaceActivity({ workspace_id: 'ws-1', page: 2, limit: 25 }, client);
+
+    const [url] = (client.get as jest.Mock).mock.calls[0];
+    expect(url).toContain('page=2');
+    expect(url).toContain('limit=25');
+  });
+
+  it('omits page/limit from the query string when not given', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce([]);
+
+    await handleListWorkspaceActivity({ workspace_id: 'ws-1' }, client);
+
+    const [url] = (client.get as jest.Mock).mock.calls[0];
+    expect(url).not.toContain('page=');
+    expect(url).not.toContain('limit=');
+  });
+});
+
+describe('handleListWorkspaceRepos', () => {
+  it('calls the repos endpoint', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce([]);
+
+    await handleListWorkspaceRepos({ workspace_id: 'ws-1' }, client);
+
+    expect(client.get).toHaveBeenCalledWith('/bff/workflow-backend/api/workspaces/ws-1/repos');
+  });
+});
+
+describe('handleReadStorageDocument', () => {
+  const WS = 'ws-uuid-1';
+  const FID = 'feat-uuid-1';
+  const KIND: DocumentKind = 'product_spec';
+
+  it('returns document content on success', async () => {
+    const client = makeClient();
+    const resp: DocumentContentResponse = { content: '# Product Spec\nHello' };
+    client.get = jest.fn().mockResolvedValueOnce(resp);
+
+    const result = await handleReadStorageDocument({ workspace_id: WS, feature_id: FID, kind: KIND }, client);
+
+    expect(result.isError).toBeFalsy();
+    expect(firstText(result)).toBe('# Product Spec\nHello');
+  });
+
+  it('calls the REAL storage-service route — path as a query param, not a `kind` path segment', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce({ content: '' } as DocumentContentResponse);
+
+    await handleReadStorageDocument({ workspace_id: WS, feature_id: FID, kind: KIND }, client);
+
+    expect(client.get).toHaveBeenCalledWith(
+      `/bff/storage-service/api/workspaces/${WS}/features/${FID}/documents/content?path=product_spec.md`,
+    );
+  });
+
+  it('maps every document kind to its canonical filename', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValue({ content: '' } as DocumentContentResponse);
+
+    await handleReadStorageDocument({ workspace_id: WS, feature_id: FID, kind: 'technical_design' }, client);
+    expect(client.get).toHaveBeenLastCalledWith(expect.stringContaining('path=tech_design.md'));
+
+    await handleReadStorageDocument({ workspace_id: WS, feature_id: FID, kind: 'tasks' }, client);
+    expect(client.get).toHaveBeenLastCalledWith(expect.stringContaining('path=tasks.md'));
+
+    await handleReadStorageDocument({ workspace_id: WS, feature_id: FID, kind: 'handoff' }, client);
+    expect(client.get).toHaveBeenLastCalledWith(expect.stringContaining('path=handoff.md'));
+  });
+
+  it('returns document_not_found on 404', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockRejectedValueOnce(new BffRequestError('404', 404, {}));
+
+    const result = await handleReadStorageDocument({ workspace_id: WS, feature_id: FID, kind: KIND }, client);
+
+    expect(result.isError).toBe(true);
+    const body = JSON.parse(firstText(result));
+    expect(body.reason).toMatch(/document_not_found/);
+    expect(body.reason).toContain(KIND);
+  });
+
+  it('returns auth error on BffAuthError', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockRejectedValueOnce(AUTH_ERROR);
+
+    const result = await handleReadStorageDocument({ workspace_id: WS, feature_id: FID, kind: KIND }, client);
+
+    expect(result.isError).toBe(true);
     expect(firstText(result)).toContain('Authentication failed');
   });
+});
 
-  it('returns auth error on BffAuthError during unblock call', async () => {
+describe('handleListWorkspaceDocuments', () => {
+  it('hits the workspace-wide route when feature_id is omitted', async () => {
     const client = makeClient();
-    client.get = jest.fn()
-      .mockResolvedValueOnce(makeFeatureResponse([feature]))
-      .mockResolvedValueOnce(makeTasksResponse([task]));
-    client.post = jest.fn().mockRejectedValueOnce(
-      new BffAuthError('Authentication failed (401). Please log in again and update WORKFLOW_SESSION_COOKIE'),
-    );
+    client.get = jest.fn().mockResolvedValueOnce({ documents: [{ id: 'doc-1' }] });
 
-    const result = await handleUnblockTask({ workspace_id: 'ws-1', feature: 'my-feature', task: 'T3' }, client);
+    const result = await handleListWorkspaceDocuments({ workspace_id: 'ws-1' }, client);
 
-    expect(result?.isError).toBe(true);
-    expect(firstText(result)).toContain('Authentication failed');
+    expect(client.get).toHaveBeenCalledWith('/bff/storage-service/api/workspaces/ws-1/documents');
+    expect(JSON.parse(firstText(result))).toEqual({
+      documents: [{ id: 'doc-1' }],
+      truncated: false,
+    });
   });
 
-  it('returns generic error on unexpected 500 from unblock endpoint', async () => {
+  it('hits the feature-scoped route when feature_id is given', async () => {
     const client = makeClient();
-    client.get = jest.fn()
-      .mockResolvedValueOnce(makeFeatureResponse([feature]))
-      .mockResolvedValueOnce(makeTasksResponse([task]));
-    client.post = jest.fn().mockRejectedValueOnce(
-      new BffRequestError('BFF request failed: 500 Internal Server Error', 500, undefined),
+    client.get = jest.fn().mockResolvedValueOnce({ documents: [] });
+
+    await handleListWorkspaceDocuments({ workspace_id: 'ws-1', feature_id: 'feat-1' }, client);
+
+    expect(client.get).toHaveBeenCalledWith(
+      '/bff/storage-service/api/workspaces/ws-1/features/feat-1/documents',
     );
+  });
 
-    const result = await handleUnblockTask({ workspace_id: 'ws-1', feature: 'my-feature', task: 'T3' }, client);
+  it('appends limit to the query string when given', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce({ documents: [] });
 
-    expect(result?.isError).toBe(true);
-    expect(firstText(result)).toContain('500');
+    await handleListWorkspaceDocuments({ workspace_id: 'ws-1', limit: 100 }, client);
+
+    expect(client.get).toHaveBeenCalledWith(
+      '/bff/storage-service/api/workspaces/ws-1/documents?limit=100',
+    );
+  });
+
+  it('relays truncated=true from the upstream response', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce({ documents: [{ id: 'doc-1' }], truncated: true });
+
+    const result = await handleListWorkspaceDocuments({ workspace_id: 'ws-1' }, client);
+
+    expect(JSON.parse(firstText(result))).toEqual({
+      documents: [{ id: 'doc-1' }],
+      truncated: true,
+    });
+  });
+});
+
+describe('handleGetDocumentVersions', () => {
+  it('calls the versions endpoint and relays the array', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce({ versions: [{ id: 'v1' }] });
+
+    const result = await handleGetDocumentVersions({ document_id: 'doc-1' }, client);
+
+    expect(client.get).toHaveBeenCalledWith('/bff/storage-service/api/documents/doc-1/versions');
+    expect(JSON.parse(firstText(result))).toEqual({ versions: [{ id: 'v1' }], truncated: false });
+  });
+
+  it('appends limit to the query string when given', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce({ versions: [] });
+
+    await handleGetDocumentVersions({ document_id: 'doc-1', limit: 50 }, client);
+
+    expect(client.get).toHaveBeenCalledWith(
+      '/bff/storage-service/api/documents/doc-1/versions?limit=50',
+    );
+  });
+
+  it('returns document_not_found on 404', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockRejectedValueOnce(new BffRequestError('404', 404, {}));
+
+    const result = await handleGetDocumentVersions({ document_id: 'missing' }, client);
+
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toMatch(/document_not_found/);
+  });
+});
+
+describe('handleWhoami', () => {
+  it('calls GET /api/me and relays the data envelope', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce({
+      success: true,
+      data: { user: { id: 'u1' }, memberships: [] },
+    });
+
+    const result = await handleWhoami(client);
+
+    expect(client.get).toHaveBeenCalledWith('/bff/user-service/api/me');
+    expect(JSON.parse(firstText(result))).toEqual({ user: { id: 'u1' }, memberships: [] });
+  });
+});
+
+describe('resolveWorkspaceId', () => {
+  it('uses the explicitly provided workspace_id when set', () => {
+    const result = resolveWorkspaceId('ws-explicit', 'ws-default');
+    expect(result).toEqual({ workspaceId: 'ws-explicit' });
+  });
+
+  it('falls back to the default workspace_id when none is provided', () => {
+    const result = resolveWorkspaceId(undefined, 'ws-default');
+    expect(result).toEqual({ workspaceId: 'ws-default' });
+  });
+
+  it('returns an error result when neither is available', () => {
+    const result = resolveWorkspaceId(undefined, undefined);
+    expect('error' in result).toBe(true);
+    if ('error' in result) {
+      expect(result.error.isError).toBe(true);
+      expect(firstText(result.error)).toMatch(/workspace_id/);
+    }
+  });
+});
+
+describe('resolveOrgId', () => {
+  it('uses the explicitly provided org_id when set', () => {
+    expect(resolveOrgId('org-explicit', 'org-default')).toEqual({ orgId: 'org-explicit' });
+  });
+
+  it('falls back to the default org_id when none is provided', () => {
+    expect(resolveOrgId(undefined, 'org-default')).toEqual({ orgId: 'org-default' });
+  });
+
+  it('returns an error result when neither is available', () => {
+    const result = resolveOrgId(undefined, undefined);
+    expect('error' in result).toBe(true);
+    if ('error' in result) {
+      expect(result.error.isError).toBe(true);
+      expect(firstText(result.error)).toMatch(/org_id/);
+    }
   });
 });

@@ -18,32 +18,39 @@ describe('BffClient', () => {
     mockFetch.mockReset();
   });
 
-  describe('Cookie header', () => {
-    it('attaches Cookie: session_id header when sessionCookie is set', async () => {
+  describe('Bearer token (shared credential file)', () => {
+    it('attaches Authorization: Bearer header when bearerToken is set', async () => {
       mockFetch.mockResolvedValueOnce(makeResponse(200, { ok: true }));
-      const client = new BffClient('http://bff.example.com', 'abc123');
+      const client = new BffClient('http://bff.example.com', 'jwt-abc');
       await client.get('/api/test');
 
       const [, init] = mockFetch.mock.calls[0];
-      expect(init.headers['Cookie']).toBe('session_id=abc123');
+      expect(init.headers['Authorization']).toBe('Bearer jwt-abc');
     });
 
-    it('does not attach Cookie header when sessionCookie is undefined', async () => {
+    it('does not attach Authorization header when bearerToken is undefined', async () => {
       mockFetch.mockResolvedValueOnce(makeResponse(200, { ok: true }));
       const client = new BffClient('http://bff.example.com', undefined);
       await client.get('/api/test');
 
       const [, init] = mockFetch.mock.calls[0];
-      expect(init.headers['Cookie']).toBeUndefined();
+      expect(init.headers['Authorization']).toBeUndefined();
     });
 
     it('strips trailing slash from bffUrl before appending path', async () => {
       mockFetch.mockResolvedValueOnce(makeResponse(200, {}));
-      const client = new BffClient('http://bff.example.com/', 'tok');
+      const client = new BffClient('http://bff.example.com/', 'jwt-abc');
       await client.get('/api/foo');
 
       const [url] = mockFetch.mock.calls[0];
       expect(url).toBe('http://bff.example.com/api/foo');
+    });
+
+    it('401 error message points at reconnecting via the extension', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse(401));
+      const client = new BffClient('http://bff.example.com', 'expired-jwt');
+
+      await expect(client.get('/api/test')).rejects.toThrow(/Actorium: Connect/);
     });
   });
 
@@ -53,20 +60,6 @@ describe('BffClient', () => {
       const client = new BffClient('http://bff.example.com', 'expired');
 
       await expect(client.get('/api/test')).rejects.toThrow(BffAuthError);
-    });
-
-    it('401 error message mentions WORKFLOW_SESSION_COOKIE', async () => {
-      mockFetch.mockResolvedValueOnce(makeResponse(401));
-      const client = new BffClient('http://bff.example.com', 'expired');
-
-      await expect(client.get('/api/test')).rejects.toThrow('WORKFLOW_SESSION_COOKIE');
-    });
-
-    it('401 error message mentions re-login guidance', async () => {
-      mockFetch.mockResolvedValueOnce(makeResponse(401));
-      const client = new BffClient('http://bff.example.com', 'expired');
-
-      await expect(client.get('/api/test')).rejects.toThrow(/log in again/i);
     });
   });
 
@@ -130,19 +123,6 @@ describe('BffClient', () => {
       const [, init] = mockFetch.mock.calls[0];
       expect(init.method).toBe('GET');
       expect(result).toEqual({ id: '1' });
-    });
-  });
-
-  describe('post', () => {
-    it('sends a POST request with JSON body', async () => {
-      mockFetch.mockResolvedValueOnce(makeResponse(200, { created: true }));
-      const client = new BffClient('http://bff.example.com', 'tok');
-      const result = await client.post<{ created: boolean }>('/api/tasks', { name: 'T1' });
-
-      const [, init] = mockFetch.mock.calls[0];
-      expect(init.method).toBe('POST');
-      expect(init.body).toBe(JSON.stringify({ name: 'T1' }));
-      expect(result).toEqual({ created: true });
     });
   });
 });

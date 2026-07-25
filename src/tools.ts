@@ -8,6 +8,27 @@ function isUuid(s: string): boolean {
   return UUID_RE.test(s);
 }
 
+export type ToolResult = CallToolResult;
+
+function formatBffError(err: unknown): ToolResult {
+  const message = err instanceof Error ? err.message : String(err);
+  return { content: [{ type: 'text', text: message }], isError: true };
+}
+
+// Compact (no pretty-print indent) — every tool response here gets fed
+// straight into a coding agent's context window, so the whitespace/newlines
+// a pretty-printed JSON.stringify adds is pure wasted tokens with no
+// readability benefit to the model consuming it.
+function jsonResult(value: unknown): ToolResult {
+  return { content: [{ type: 'text', text: JSON.stringify(value) }] };
+}
+
+function notFoundResult(reason: string): ToolResult {
+  return { content: [{ type: 'text', text: JSON.stringify({ ok: false, reason }) }], isError: true };
+}
+
+// ── get_feature ──────────────────────────────────────────────────────────────
+
 export interface Feature {
   id: string;
   feature_id: string;
@@ -28,130 +49,31 @@ export interface FeaturesResponse {
   };
 }
 
-export interface TaskInput {
-  name: string;
-  title: string;
-  repo: string;
-  depends_on: string[];
-  actor_type?: 'agent' | 'human' | 'either';
-}
-
-export interface CreatedTask {
-  task_id: string;
-  task_name: string;
+/** The feature-detail endpoint's response — bundles what used to take several
+ * separate tool calls (docs, tasks, activity, sync state) into one. `tasks`/
+ * `activity`/`documents`/`source_state`/`task_counts` are relayed as-is
+ * (server-defined shapes) rather than fully re-typed here. */
+export interface FeatureDetail {
+  id: string;
+  feature_name: string;
   title: string;
   status: string;
+  current_stage: string;
+  next_action?: string;
+  owner?: string;
+  updated_at?: string;
+  workspace_id: string;
+  task_counts?: Record<string, number>;
+  documents?: unknown[];
+  tasks?: unknown[];
+  activity?: unknown[];
+  source_state?: Record<string, unknown>;
+  [key: string]: unknown;
 }
 
-export interface TaskFailure {
-  name: string;
-  reason: string;
-}
-
-export interface CreateTasksResponse {
-  tasks: CreatedTask[];
-}
-
-export type ToolResult = CallToolResult;
-
-function formatBffError(err: unknown): ToolResult {
-  const message = err instanceof Error ? err.message : String(err);
-  return { content: [{ type: 'text', text: message }], isError: true };
-}
-
-function extractFailures(body: unknown): TaskFailure[] | null {
-  if (!body) return null;
-
-  if (Array.isArray(body)) {
-    if (body.length > 0 && typeof body[0] === 'object' && 'name' in body[0] && 'reason' in body[0]) {
-      return body as TaskFailure[];
-    }
-  }
-
-  if (typeof body === 'object' && body !== null) {
-    const obj = body as Record<string, unknown>;
-    if (Array.isArray(obj.failures)) return extractFailures(obj.failures);
-    if (Array.isArray(obj.errors)) return extractFailures(obj.errors);
-  }
-
-  return null;
-}
-
-export async function handleGetFeature(
-  args: { workspace_id: string; name: string },
-  bffClient: BffClient,
-): Promise<ToolResult> {
-  const { workspace_id, name } = args;
-  let response: FeaturesResponse;
-  try {
-    response = await bffClient.get<FeaturesResponse>(
-      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/features?name=${encodeURIComponent(name)}`,
-    );
-  } catch (err) {
-    return formatBffError(err);
-  }
-
-  const features = response.data?.items ?? [];
-  if (features.length === 0) {
-    return {
-      content: [{ type: 'text', text: `Feature not found: "${name}" in workspace ${workspace_id}` }],
-    };
-  }
-
-  return {
-    content: [{ type: 'text', text: JSON.stringify(features[0], null, 2) }],
-  };
-}
-
-export async function handleCreateTasks(
-  args: { workspace_id: string; feature_id: string; tasks: TaskInput[] },
-  bffClient: BffClient,
-): Promise<ToolResult> {
-  const { workspace_id, feature_id, tasks } = args;
-  try {
-    const response = await bffClient.post<CreateTasksResponse>(
-      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/features/${encodeURIComponent(feature_id)}/tasks`,
-      { tasks },
-    );
-    return {
-      content: [{ type: 'text', text: JSON.stringify(response.tasks ?? response, null, 2) }],
-    };
-  } catch (err) {
-    if (err instanceof BffRequestError && (err.status === 409 || err.status === 422)) {
-      const failures = extractFailures(err.body);
-      if (failures) {
-        const lines = failures.map((f) => `- ${f.name}: ${f.reason}`).join('\n');
-        return {
-          content: [{ type: 'text', text: `Task creation failed. The following tasks could not be created:\n\n${lines}` }],
-          isError: true,
-        };
-      }
-    }
-    return formatBffError(err);
-  }
-}
-
-export interface Task {
-  task_id: string;
-  task_name: string;
-  title: string;
-  status: string;
-}
-
-export interface TasksResponse {
+export interface FeatureDetailResponse {
   success: boolean;
-  data: {
-    items: Task[];
-    total: number;
-    page: number;
-    limit: number;
-  };
-}
-
-export interface UnblockResponse {
-  task_id: string;
-  from: string;
-  to: string;
+  data: FeatureDetail;
 }
 
 async function resolveFeatureUuid(
@@ -172,135 +94,739 @@ async function resolveFeatureUuid(
 
   const features = response.data?.items ?? [];
   if (features.length === 0) {
-    return {
-      error: {
-        content: [{ type: 'text', text: JSON.stringify({ ok: false, reason: `feature_not_found: "${feature}" in workspace ${workspaceId}` }) }],
-        isError: true,
-      },
-    };
+    return { error: notFoundResult(`feature_not_found: "${feature}" in workspace ${workspaceId}`) };
   }
   return { featureUuid: features[0].id };
 }
 
-async function resolveTaskUuid(
-  workspaceId: string,
-  featureUuid: string,
-  task: string,
-  bffClient: BffClient,
-): Promise<{ taskUuid: string } | { error: ToolResult }> {
-  if (isUuid(task)) return { taskUuid: task };
-
-  let response: TasksResponse;
-  try {
-    response = await bffClient.get<TasksResponse>(
-      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspaceId)}/features/${encodeURIComponent(featureUuid)}/tasks?name=${encodeURIComponent(task)}`,
-    );
-  } catch (err) {
-    return { error: formatBffError(err) };
-  }
-
-  const tasks = response.data?.items ?? [];
-  if (tasks.length === 0) {
-    return {
-      error: {
-        content: [{ type: 'text', text: JSON.stringify({ ok: false, reason: `task_not_found: "${task}" in feature ${featureUuid}` }) }],
-        isError: true,
-      },
-    };
-  }
-  return { taskUuid: tasks[0].task_id };
-}
-
-export async function handleUnblockTask(
-  args: { workspace_id: string; feature: string; task: string; note?: string },
+/**
+ * Resolves a feature by name (or UUID) and returns its FULL detail —
+ * documents, tasks, activity timeline, and sync state bundled in one call by
+ * workflow-backend's own GetFeature endpoint (previously this tool only
+ * returned the bare summary from the search-by-name list endpoint).
+ */
+export async function handleGetFeature(
+  args: { workspace_id: string; name: string },
   bffClient: BffClient,
 ): Promise<ToolResult> {
-  const { workspace_id, feature, task, note } = args;
+  const { workspace_id, name } = args;
 
-  const featureResult = await resolveFeatureUuid(workspace_id, feature, bffClient);
-  if ('error' in featureResult) return featureResult.error;
-
-  const taskResult = await resolveTaskUuid(workspace_id, featureResult.featureUuid, task, bffClient);
-  if ('error' in taskResult) return taskResult.error;
+  const resolved = await resolveFeatureUuid(workspace_id, name, bffClient);
+  if ('error' in resolved) return resolved.error;
 
   try {
-    const body: Record<string, string> = note !== undefined ? { note } : {};
-    const response = await bffClient.post<UnblockResponse>(
-      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/features/${encodeURIComponent(featureResult.featureUuid)}/tasks/${encodeURIComponent(taskResult.taskUuid)}/unblock`,
-      body,
+    const detail = await bffClient.get<FeatureDetailResponse>(
+      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/features/${encodeURIComponent(resolved.featureUuid)}`,
     );
-    return {
-      content: [{ type: 'text', text: JSON.stringify({ ok: true, from: response.from, to: response.to }) }],
-    };
+    return jsonResult(detail.data);
   } catch (err) {
-    if (err instanceof BffRequestError) {
-      if (err.status === 409) {
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ ok: false, reason: 'task_not_blocked' }) }],
-          isError: true,
-        };
-      }
-      if (err.status === 404) {
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ ok: false, reason: 'task_not_found' }) }],
-          isError: true,
-        };
-      }
-      if (err.status === 403) {
-        return {
-          content: [{ type: 'text', text: JSON.stringify({ ok: false, reason: 'access_denied' }) }],
-          isError: true,
-        };
-      }
+    return formatBffError(err);
+  }
+}
+
+// ── list_workspaces ───────────────────────────────────────────────────────────
+
+export interface WorkspaceSummary {
+  id: string;
+  organization_id: string;
+  name: string;
+  slug: string;
+  [key: string]: unknown;
+}
+
+export interface WorkspacesResponse {
+  success: boolean;
+  data: WorkspaceSummary[];
+}
+
+export async function handleListWorkspaces(
+  args: { org_id: string },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  try {
+    const response = await bffClient.get<WorkspacesResponse>(
+      `/bff/workflow-backend/api/workspaces?org=${encodeURIComponent(args.org_id)}`,
+    );
+    return jsonResult(response.data);
+  } catch (err) {
+    return formatBffError(err);
+  }
+}
+
+// ── search_features ────────────────────────────────────────────────────────────
+
+export interface SearchFeaturesArgs {
+  workspace_id: string;
+  status?: string;
+  title?: string;
+  sort?: string;
+  page?: number;
+  limit?: number;
+  include_tasks?: boolean;
+}
+
+export async function handleSearchFeatures(
+  args: SearchFeaturesArgs,
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const { workspace_id, status, title, sort, page, limit, include_tasks } = args;
+  const qs = new URLSearchParams();
+  if (status) qs.set('status', status);
+  if (title) qs.set('title', title);
+  if (sort) qs.set('sort', sort);
+  if (page !== undefined) qs.set('page', String(page));
+  if (limit !== undefined) qs.set('limit', String(limit));
+  if (include_tasks) qs.set('include', 'tasks');
+
+  try {
+    const query = qs.toString();
+    const response = await bffClient.get<{ success: boolean; data: unknown }>(
+      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/features${query ? `?${query}` : ''}`,
+    );
+    return jsonResult(response.data);
+  } catch (err) {
+    return formatBffError(err);
+  }
+}
+
+// ── search_tasks ────────────────────────────────────────────────────────────
+
+export interface SearchTasksArgs {
+  workspace_id: string;
+  feature_id?: string;
+  task_id?: string;
+  title?: string;
+  status?: string;
+  repo?: string;
+  sort?: string;
+  page?: number;
+  limit?: number;
+}
+
+export async function handleSearchTasks(args: SearchTasksArgs, bffClient: BffClient): Promise<ToolResult> {
+  const { workspace_id, feature_id, task_id, title, status, repo, sort, page, limit } = args;
+  const qs = new URLSearchParams();
+  if (task_id) qs.set('task_id', task_id);
+  if (title) qs.set('title', title);
+  if (status) qs.set('status', status);
+  if (repo) qs.set('repo', repo);
+  if (sort) qs.set('sort', sort);
+  if (page !== undefined) qs.set('page', String(page));
+  if (limit !== undefined) qs.set('limit', String(limit));
+
+  const base = feature_id
+    ? `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/features/${encodeURIComponent(feature_id)}/tasks`
+    : `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/tasks`;
+
+  try {
+    const query = qs.toString();
+    const response = await bffClient.get<{ success: boolean; data: unknown }>(
+      `${base}${query ? `?${query}` : ''}`,
+    );
+    return jsonResult(response.data);
+  } catch (err) {
+    return formatBffError(err);
+  }
+}
+
+// ── get_task ────────────────────────────────────────────────────────────────
+
+export async function handleGetTask(
+  args: { workspace_id: string; task_id: string },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const { workspace_id, task_id } = args;
+  try {
+    const response = await bffClient.get<{ success: boolean; data: unknown }>(
+      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/tasks/${encodeURIComponent(task_id)}`,
+    );
+    return jsonResult(response.data);
+  } catch (err) {
+    if (err instanceof BffRequestError && err.status === 404) {
+      return notFoundResult(`task_not_found: "${task_id}" in workspace ${workspace_id}`);
     }
     return formatBffError(err);
   }
 }
 
-export function registerTools(server: McpServer, bffClient: BffClient): void {
-  server.tool(
+// ── get_task_diff / get_task_review_thread ──────────────────────────────────
+
+export async function handleGetTaskDiff(
+  args: { workspace_id: string; task_id: string; repo?: string; files_only?: boolean },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const { workspace_id, task_id, repo, files_only } = args;
+  const params = new URLSearchParams();
+  if (repo) params.set('repo', repo);
+  if (files_only) params.set('files_only', 'true');
+  const query = params.toString();
+  const qs = query ? `?${query}` : '';
+  try {
+    const response = await bffClient.get<{ success: boolean; data: unknown }>(
+      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/tasks/${encodeURIComponent(task_id)}/diff${qs}`,
+    );
+    return jsonResult(response.data);
+  } catch (err) {
+    if (err instanceof BffRequestError && err.status === 404) {
+      return notFoundResult(`task_not_found: "${task_id}" in workspace ${workspace_id}`);
+    }
+    return formatBffError(err);
+  }
+}
+
+export async function handleGetTaskReviewThread(
+  args: { workspace_id: string; task_id: string; repo?: string },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const { workspace_id, task_id, repo } = args;
+  const qs = repo ? `?repo=${encodeURIComponent(repo)}` : '';
+  try {
+    const response = await bffClient.get<{ success: boolean; data: unknown }>(
+      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/tasks/${encodeURIComponent(task_id)}/review-thread${qs}`,
+    );
+    return jsonResult(response.data);
+  } catch (err) {
+    if (err instanceof BffRequestError && err.status === 404) {
+      return notFoundResult(`task_not_found: "${task_id}" in workspace ${workspace_id}`);
+    }
+    return formatBffError(err);
+  }
+}
+
+// ── get_feature_handoff ──────────────────────────────────────────────────────
+
+export async function handleGetFeatureHandoff(
+  args: { workspace_id: string; feature_id: string },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const { workspace_id, feature_id } = args;
+  try {
+    const response = await bffClient.get<{ success: boolean; data: unknown }>(
+      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/features/${encodeURIComponent(feature_id)}/handoff`,
+    );
+    return jsonResult(response.data);
+  } catch (err) {
+    if (err instanceof BffRequestError && err.status === 404) {
+      return notFoundResult(
+        `handoff_not_found: feature ${feature_id} is not go-owned, or has no handoff yet`,
+      );
+    }
+    return formatBffError(err);
+  }
+}
+
+// ── list_workspace_activity ──────────────────────────────────────────────────
+
+export async function handleListWorkspaceActivity(
+  args: {
+    workspace_id: string;
+    feature_id?: string;
+    task_id?: string;
+    audience?: 'internal' | 'client';
+    page?: number;
+    limit?: number;
+  },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const { workspace_id, feature_id, task_id, audience, page, limit } = args;
+  const qs = new URLSearchParams();
+  if (feature_id) qs.set('featureId', feature_id);
+  if (task_id) qs.set('taskId', task_id);
+  if (audience) qs.set('audience', audience);
+  if (page !== undefined) qs.set('page', String(page));
+  if (limit !== undefined) qs.set('limit', String(limit));
+
+  try {
+    const query = qs.toString();
+    const response = await bffClient.get<{ success: boolean; data: unknown }>(
+      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/activity${query ? `?${query}` : ''}`,
+    );
+    return jsonResult(response.data);
+  } catch (err) {
+    return formatBffError(err);
+  }
+}
+
+// ── list_workspace_repos ─────────────────────────────────────────────────────
+
+export async function handleListWorkspaceRepos(
+  args: { workspace_id: string },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  try {
+    const response = await bffClient.get<{ success: boolean; data: unknown }>(
+      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(args.workspace_id)}/repos`,
+    );
+    return jsonResult(response.data);
+  } catch (err) {
+    return formatBffError(err);
+  }
+}
+
+// ── read_storage_document ─────────────────────────────────────────────────────
+
+export type DocumentKind = 'product_spec' | 'technical_design' | 'tasks' | 'handoff';
+
+export interface DocumentContentResponse {
+  content: string;
+}
+
+/** Canonical per-feature filename for each document kind — storage-service
+ * keys documents by feature-relative PATH, not by this "kind" vocabulary
+ * (see documentContentPath below), so every caller needs this mapping. */
+const KIND_TO_FILENAME: Record<DocumentKind, string> = {
+  product_spec: 'product_spec.md',
+  technical_design: 'tech_design.md',
+  tasks: 'tasks.md',
+  handoff: 'handoff.md',
+};
+
+/**
+ * Builds the real storage-service content route:
+ * `GET .../documents/content?path=<feature-relative-filename>` — NOT
+ * `.../documents/:kind/content` (that route doesn't exist; storage-service's
+ * handler.go registers `/documents/content` with `path` as a query param,
+ * confirmed directly against the source). Mirrors the Actorium VS Code
+ * extension's own toFeatureRelativePath/getDocumentContent (workflow-api.ts).
+ */
+function documentContentPath(workspaceId: string, featureId: string, kind: DocumentKind): string {
+  const qs = new URLSearchParams({ path: KIND_TO_FILENAME[kind] });
+  return `/bff/storage-service/api/workspaces/${encodeURIComponent(workspaceId)}/features/${encodeURIComponent(featureId)}/documents/content?${qs}`;
+}
+
+export async function handleReadStorageDocument(
+  args: { workspace_id: string; feature_id: string; kind: DocumentKind },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const { workspace_id, feature_id, kind } = args;
+  try {
+    const response = await bffClient.get<DocumentContentResponse>(
+      documentContentPath(workspace_id, feature_id, kind),
+    );
+    return { content: [{ type: 'text', text: response.content }] };
+  } catch (err) {
+    if (err instanceof BffRequestError && err.status === 404) {
+      return notFoundResult(`document_not_found: kind="${kind}" in feature ${feature_id}`);
+    }
+    return formatBffError(err);
+  }
+}
+
+// ── list_workspace_documents ──────────────────────────────────────────────────
+
+export async function handleListWorkspaceDocuments(
+  args: { workspace_id: string; feature_id?: string; limit?: number },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const { workspace_id, feature_id, limit } = args;
+  const base = feature_id
+    ? `/bff/storage-service/api/workspaces/${encodeURIComponent(workspace_id)}/features/${encodeURIComponent(feature_id)}/documents`
+    : `/bff/storage-service/api/workspaces/${encodeURIComponent(workspace_id)}/documents`;
+  const qs = limit !== undefined ? `?limit=${encodeURIComponent(limit)}` : '';
+
+  try {
+    const response = await bffClient.get<{ documents: unknown[]; truncated?: boolean }>(
+      `${base}${qs}`,
+    );
+    return jsonResult({ documents: response.documents, truncated: !!response.truncated });
+  } catch (err) {
+    return formatBffError(err);
+  }
+}
+
+// ── get_document_versions ────────────────────────────────────────────────────
+
+export async function handleGetDocumentVersions(
+  args: { document_id: string; limit?: number },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const qs = args.limit !== undefined ? `?limit=${encodeURIComponent(args.limit)}` : '';
+  try {
+    const response = await bffClient.get<{ versions: unknown[]; truncated?: boolean }>(
+      `/bff/storage-service/api/documents/${encodeURIComponent(args.document_id)}/versions${qs}`,
+    );
+    return jsonResult({ versions: response.versions, truncated: !!response.truncated });
+  } catch (err) {
+    if (err instanceof BffRequestError && err.status === 404) {
+      return notFoundResult(`document_not_found: "${args.document_id}"`);
+    }
+    return formatBffError(err);
+  }
+}
+
+// ── whoami ────────────────────────────────────────────────────────────────────
+
+export async function handleWhoami(bffClient: BffClient): Promise<ToolResult> {
+  try {
+    const response = await bffClient.get<{ success: boolean; data: unknown }>(
+      '/bff/user-service/api/me',
+    );
+    return jsonResult(response.data);
+  } catch (err) {
+    return formatBffError(err);
+  }
+}
+
+// ── workspace_id / org_id resolution ──────────────────────────────────────────
+
+const WORKSPACE_ID_DESCRIPTION =
+  'Workspace UUID. Optional when running under the Actorium VS Code extension — the ' +
+  "connected workspace's UUID is used automatically. Pass it explicitly to target a " +
+  'different workspace, or when no extension is connected.';
+
+const ORG_ID_DESCRIPTION =
+  'Organization UUID. Optional when running under the Actorium VS Code extension — the ' +
+  "connected org's UUID is used automatically. Pass it explicitly to target a different " +
+  'organization, or when no extension is connected.';
+
+export function missingWorkspaceIdError(): ToolResult {
+  return notFoundResult(
+    'workspace_id was not provided and no default workspace is configured. Pass workspace_id ' +
+      'explicitly, or connect a workspace via the Actorium VS Code extension.',
+  );
+}
+
+function missingOrgIdError(): ToolResult {
+  return notFoundResult(
+    'org_id was not provided and no default organization is configured. Pass org_id explicitly, ' +
+      'or connect an organization via the Actorium VS Code extension.',
+  );
+}
+
+/** Resolves the caller-supplied workspace_id against the configured default
+ * (from the shared credential file — see authFile.ts), returning a ready-to-
+ * return error ToolResult when neither is available. */
+export function resolveWorkspaceId(
+  provided: string | undefined,
+  defaultWorkspaceId: string | undefined,
+): { workspaceId: string } | { error: ToolResult } {
+  const workspaceId = provided ?? defaultWorkspaceId;
+  if (!workspaceId) return { error: missingWorkspaceIdError() };
+  return { workspaceId };
+}
+
+/** Same pattern as resolveWorkspaceId, for tools scoped by org instead
+ * (currently just list_workspaces). */
+export function resolveOrgId(
+  provided: string | undefined,
+  defaultOrgId: string | undefined,
+): { orgId: string } | { error: ToolResult } {
+  const orgId = provided ?? defaultOrgId;
+  if (!orgId) return { error: missingOrgIdError() };
+  return { orgId };
+}
+
+/** Every tool this server exposes is a GET with no side effects on an
+ * external system — applied uniformly below via registerTool's config
+ * object (the current, non-deprecated replacement for the old positional
+ * `server.tool(name, description, schema, cb)` overloads). */
+const READ_ONLY_ANNOTATIONS = { readOnlyHint: true, openWorldHint: true };
+
+export function registerTools(
+  server: McpServer,
+  bffClient: BffClient,
+  defaultWorkspaceId?: string,
+  defaultOrgId?: string,
+): void {
+  server.registerTool(
     'get_feature',
-    'Get a workflow feature by name (slug). Returns the feature including its UUID, or a not-found message.',
     {
-      workspace_id: z.string().describe('Workspace UUID'),
-      name: z.string().describe('Feature name (slug), e.g. "executor-self-briefing"'),
+      description:
+        'Get a workflow feature by name (slug). Returns the full feature detail — status/stage, ' +
+        'documents, tasks, activity timeline, and sync state all in one call. The embedded ' +
+        'activity timeline is capped at the 50 most recent events — use list_workspace_activity ' +
+        'for the full history.',
+      inputSchema: {
+        workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+        name: z.string().describe('Feature name (slug), e.g. "executor-self-briefing"'),
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
     },
-    (args) => handleGetFeature(args, bffClient),
+    (args) => {
+      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      if ('error' in resolved) return resolved.error;
+      return handleGetFeature({ ...args, workspace_id: resolved.workspaceId }, bffClient);
+    },
   );
 
-  server.tool(
-    'create_tasks',
-    'Bulk-create tasks for a workflow feature (all-or-nothing). Returns created tasks on success, or the failure list [{name, reason}] if any task fails validation.',
+  server.registerTool(
+    'list_workspaces',
     {
-      workspace_id: z.string().describe('Workspace UUID'),
-      feature_id: z.string().describe('Feature UUID (obtain via get_feature)'),
-      tasks: z
-        .array(
-          z.object({
-            name: z.string().describe('Task name, e.g. "T1"'),
-            title: z.string().describe('Task title'),
-            repo: z.string().describe('Target repository id'),
-            depends_on: z.array(z.string()).describe('List of task names this task depends on'),
-            actor_type: z
-              .enum(['agent', 'human', 'either'])
-              .optional()
-              .describe('Execution actor type (defaults to agent)'),
-          }),
-        )
-        .describe('Tasks to create (bulk, all-or-nothing)'),
+      description: 'List every workspace in an organization.',
+      inputSchema: {
+        org_id: z.string().optional().describe(ORG_ID_DESCRIPTION),
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
     },
-    (args) => handleCreateTasks(args, bffClient),
+    (args) => {
+      const resolved = resolveOrgId(args.org_id, defaultOrgId);
+      if ('error' in resolved) return resolved.error;
+      return handleListWorkspaces({ org_id: resolved.orgId }, bffClient);
+    },
   );
 
-  server.tool(
-    'unblock_task',
-    'Unblock a blocked workflow task. Resolves feature/task names to UUIDs, calls the unblock endpoint, and returns the server-derived resume state.',
+  server.registerTool(
+    'search_features',
     {
-      workspace_id: z.string().describe('Workspace UUID'),
-      feature: z.string().describe('Feature name (slug) or UUID, e.g. "executor-self-briefing"'),
-      task: z.string().describe('Task name (e.g. "T3") or UUID'),
-      note: z.string().optional().describe('Optional note explaining what was done to resolve the block'),
+      description:
+        'Search/list features in a workspace, optionally filtered by status/title. Set ' +
+        'include_tasks to embed each feature\'s task list (avoids N+1 get_task calls).',
+      inputSchema: {
+        workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+        status: z.string().optional().describe('Filter by feature status'),
+        title: z.string().optional().describe('Filter by title substring'),
+        sort: z.string().optional().describe('Sort order (server-defined field names)'),
+        page: z.number().optional().describe('Page number (1-indexed)'),
+        limit: z.number().optional().describe('Page size'),
+        include_tasks: z.boolean().optional().describe("Embed each feature's tasks in the response"),
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
     },
-    (args) => handleUnblockTask(args, bffClient),
+    (args) => {
+      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      if ('error' in resolved) return resolved.error;
+      return handleSearchFeatures({ ...args, workspace_id: resolved.workspaceId }, bffClient);
+    },
+  );
+
+  server.registerTool(
+    'search_tasks',
+    {
+      description: 'Search/list tasks — across the whole workspace, or scoped to one feature via feature_id.',
+      inputSchema: {
+        workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+        feature_id: z.string().optional().describe('Restrict to one feature (omit for workspace-wide)'),
+        task_id: z.string().optional().describe('Filter by task name/id'),
+        title: z.string().optional().describe('Filter by title substring'),
+        status: z.string().optional().describe('Filter by task status'),
+        repo: z.string().optional().describe('Filter by target repo id'),
+        sort: z.string().optional().describe('Sort order (server-defined field names)'),
+        page: z.number().optional().describe('Page number (1-indexed)'),
+        limit: z.number().optional().describe('Page size'),
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    (args) => {
+      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      if ('error' in resolved) return resolved.error;
+      return handleSearchTasks({ ...args, workspace_id: resolved.workspaceId }, bffClient);
+    },
+  );
+
+  server.registerTool(
+    'get_task',
+    {
+      description:
+        'Get full task detail: execution info, both PR refs (implementation + workspace/handoff), ' +
+        'per-task activity timeline (capped at the 50 most recent events), and dependency names.',
+      inputSchema: {
+        workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+        task_id: z.string().describe('Task UUID (from search_tasks/get_feature)'),
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    (args) => {
+      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      if ('error' in resolved) return resolved.error;
+      return handleGetTask({ ...args, workspace_id: resolved.workspaceId }, bffClient);
+    },
+  );
+
+  server.registerTool(
+    'get_task_diff',
+    {
+      description:
+        "Get a task's PR file list + unified diff (GitHub-backed). Empty (not an error) if the " +
+        'task has no PR yet. Large diffs are size-capped server-side (file count, per-file patch, ' +
+        'and the unified diff itself) with `truncated: true` set when a cap was hit — pass ' +
+        'files_only=true to skip the diff/patch content entirely and just get filenames + stats.',
+      inputSchema: {
+        workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+        task_id: z.string().describe('Task UUID'),
+        repo: z
+          .string()
+          .optional()
+          .describe('Which of the task\'s repos to diff (defaults to the implementation PR)'),
+        files_only: z
+          .boolean()
+          .optional()
+          .describe(
+            'Skip fetching/returning the unified diff and per-file patches — just filenames + ' +
+              'add/delete stats. Use when you only need to know what changed, not the actual diff.',
+          ),
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    (args) => {
+      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      if ('error' in resolved) return resolved.error;
+      return handleGetTaskDiff({ ...args, workspace_id: resolved.workspaceId }, bffClient);
+    },
+  );
+
+  server.registerTool(
+    'get_task_review_thread',
+    {
+      description:
+        "Get a task's PR review thread — reviews, review comments, and issue comments merged into " +
+        'one chronological feed (GitHub-backed). Capped at the 200 most recent items with each ' +
+        'item\'s body capped at 5000 bytes — `truncated: true` is set when a cap was hit.',
+      inputSchema: {
+        workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+        task_id: z.string().describe('Task UUID'),
+        repo: z
+          .string()
+          .optional()
+          .describe('Which of the task\'s repos to read (defaults to the implementation PR)'),
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    (args) => {
+      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      if ('error' in resolved) return resolved.error;
+      return handleGetTaskReviewThread({ ...args, workspace_id: resolved.workspaceId }, bffClient);
+    },
+  );
+
+  server.registerTool(
+    'get_feature_handoff',
+    {
+      description:
+        'Get a go-owned feature\'s handoff state — the multi-repo final-PR fan-out as it nears ' +
+        'completion. 404 if the feature isn\'t go-owned or has no handoff yet.',
+      inputSchema: {
+        workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+        feature_id: z.string().describe('Feature UUID'),
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    (args) => {
+      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      if ('error' in resolved) return resolved.error;
+      return handleGetFeatureHandoff({ ...args, workspace_id: resolved.workspaceId }, bffClient);
+    },
+  );
+
+  server.registerTool(
+    'list_workspace_activity',
+    {
+      description:
+        'Get the audit/activity feed for a workspace, optionally filtered to one feature or task. ' +
+        'audience=client filters to a curated, human-friendly action set; omit for the full ' +
+        'internal feed. Paginated (page/limit) — defaults to the 50 most recent events, max 1000 ' +
+        'per page.',
+      inputSchema: {
+        workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+        feature_id: z.string().optional().describe('Restrict to one feature'),
+        task_id: z.string().optional().describe('Restrict to one task'),
+        audience: z.enum(['internal', 'client']).optional().describe('Filter action verbosity'),
+        page: z.number().optional().describe('Page number (1-indexed, default 1)'),
+        limit: z.number().optional().describe('Page size (default 50, max 1000)'),
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    (args) => {
+      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      if ('error' in resolved) return resolved.error;
+      return handleListWorkspaceActivity({ ...args, workspace_id: resolved.workspaceId }, bffClient);
+    },
+  );
+
+  server.registerTool(
+    'list_workspace_repos',
+    {
+      description:
+        'List every repo registered in a workspace — id, url, default branch, whether it\'s the ' +
+        'management repo, and its tags.',
+      inputSchema: {
+        workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    (args) => {
+      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      if ('error' in resolved) return resolved.error;
+      return handleListWorkspaceRepos({ workspace_id: resolved.workspaceId }, bffClient);
+    },
+  );
+
+  server.registerTool(
+    'read_storage_document',
+    {
+      description:
+        'Read a go-owned feature\'s document content from storage-service. Scoped to go-owned ' +
+        'features only — ts-owned feature documents remain git-backed.',
+      inputSchema: {
+        workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+        feature_id: z.string().describe('Feature UUID'),
+        kind: z
+          .enum(['product_spec', 'technical_design', 'tasks', 'handoff'])
+          .describe('Document kind to read'),
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    (args) => {
+      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      if ('error' in resolved) return resolved.error;
+      return handleReadStorageDocument(
+        { ...args, workspace_id: resolved.workspaceId } as {
+          workspace_id: string;
+          feature_id: string;
+          kind: DocumentKind;
+        },
+        bffClient,
+      );
+    },
+  );
+
+  server.registerTool(
+    'list_workspace_documents',
+    {
+      description:
+        'List every document\'s metadata (id, path, created_at, current_version_id) in a workspace, ' +
+        'or in one feature via feature_id. Does not include content — use read_storage_document ' +
+        'for that. Defaults to at most 500 documents per call (max 2000) — response includes ' +
+        '`truncated: true` if the cap was hit.',
+      inputSchema: {
+        workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+        feature_id: z.string().optional().describe('Restrict to one feature (omit for workspace-wide)'),
+        limit: z.number().optional().describe('Max documents to return (default 500, max 2000)'),
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    (args) => {
+      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      if ('error' in resolved) return resolved.error;
+      return handleListWorkspaceDocuments({ ...args, workspace_id: resolved.workspaceId }, bffClient);
+    },
+  );
+
+  server.registerTool(
+    'get_document_versions',
+    {
+      description:
+        "Get a document's edit history (newest first) — source (edit/import/migration/restore) and " +
+        'timestamp per version. Note: author is a raw user UUID, not a resolved display name. ' +
+        'Defaults to at most 200 versions per call (max 1000) — response includes `truncated: ' +
+        'true` if the cap was hit.',
+      inputSchema: {
+        document_id: z.string().describe('Document UUID (from list_workspace_documents)'),
+        limit: z.number().optional().describe('Max versions to return (default 200, max 1000)'),
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    (args) => handleGetDocumentVersions(args, bffClient),
+  );
+
+  server.registerTool(
+    'whoami',
+    {
+      description:
+        'Get the authenticated caller\'s identity — profile, org memberships, and platform roles. ' +
+        'Useful for sanity-checking auth/org scope before calling workspace-scoped tools.',
+      inputSchema: {},
+      annotations: READ_ONLY_ANNOTATIONS,
+    },
+    () => handleWhoami(bffClient),
   );
 }
