@@ -1,15 +1,15 @@
 {
   "name": "@actorium-ai/actorium-mcp",
-  "version": "0.1.0",
-  "description": "Read-only MCP server exposing feature/task/document/identity context from the workflow BFF API",
+  "version": "0.2.0",
+  "description": "Read-only MCP server exposing feature/task/document/identity context for Actorium",
   "license": "MIT",
   "type": "commonjs",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/batu4404/workflow-mcp.git"
+    "url": "git+https://github.com/actorium-ai/workflow-mcp.git"
   },
   "publishConfig": {
-    "access": "restricted"
+    "access": "public"
   },
   "bin": {
     "actorium-mcp": "dist/index.js"
