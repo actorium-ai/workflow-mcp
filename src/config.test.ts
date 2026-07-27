@@ -100,6 +100,26 @@ describe('loadConfig', () => {
     expect(config.defaultOrgId).toBe('org-from-file');
   });
 
+  it('passes the resolved bffUrl (from API_URL) to readCredentialFile', () => {
+    process.env.API_URL = 'https://sw.example.com';
+    delete process.env.WORKFLOW_TOKEN;
+    const readSpy = jest.spyOn(authFile, 'readCredentialFile').mockReturnValue(null);
+
+    loadConfig();
+
+    expect(readSpy).toHaveBeenCalledWith('https://sw.example.com');
+  });
+
+  it('passes the default bffUrl to readCredentialFile when API_URL is not set', () => {
+    delete process.env.API_URL;
+    delete process.env.WORKFLOW_TOKEN;
+    const readSpy = jest.spyOn(authFile, 'readCredentialFile').mockReturnValue(null);
+
+    loadConfig();
+
+    expect(readSpy).toHaveBeenCalledWith('http://localhost:8090');
+  });
+
   it('the cwd-based manifest still applies even when an explicit bearer token env var is set', () => {
     process.env.WORKFLOW_TOKEN = 'env-token';
     jest

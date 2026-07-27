@@ -28,11 +28,13 @@ const DEFAULT_BFF_URL = 'http://localhost:8090';
  * defaultWorkspaceId/defaultOrgId are resolved differently: the cwd-based
  * workspace manifest (see workspaceManifest.ts) wins over the credential
  * file's stored values whenever actorium-mcp is running from inside a linked
- * workspace folder — the credential file is a single machine-wide "last
- * selected" value, so with multiple VS Code windows open on different
- * workspaces it only reflects whichever window synced most recently. The
- * manifest instead answers "which workspace is THIS folder for" directly,
- * which stays correct regardless of what any other window/process is doing.
+ * workspace folder. The credential file itself is now keyed by `bffUrl` (see
+ * authFile.ts) — one VS Code window per backend — so even without a manifest
+ * it already reflects the right backend's own selection, not just whichever
+ * window/environment happened to sync most recently. The manifest still wins
+ * when present since it answers "which workspace is THIS folder for"
+ * directly, which stays correct regardless of what any other window/process
+ * is doing.
  */
 export function loadConfig(): Config {
   const bffUrl = process.env.API_URL ?? DEFAULT_BFF_URL;
@@ -48,7 +50,7 @@ export function loadConfig(): Config {
     };
   }
 
-  const stored = readCredentialFile();
+  const stored = readCredentialFile(bffUrl);
   if (stored) {
     return {
       bffUrl,
