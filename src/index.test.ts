@@ -1,5 +1,6 @@
 import * as config from './config';
 import { runCli } from './index';
+import * as channel from './channel';
 import * as pair from './pair';
 import * as server from './server';
 
@@ -10,6 +11,7 @@ describe('runCli', () => {
     jest.spyOn(server, 'createServer').mockReturnValue({
       connect: jest.fn().mockResolvedValue(undefined),
     } as unknown as ReturnType<typeof server.createServer>);
+    jest.spyOn(channel, 'startChannel').mockReturnValue(null);
   });
 
   afterEach(() => {
@@ -38,5 +40,19 @@ describe('runCli', () => {
 
     expect(server.createServer).toHaveBeenCalled();
     expect(pair.runPair).not.toHaveBeenCalled();
+  });
+
+  it('starts the paired-agent review channel when running the MCP server', async () => {
+    await runCli(['node', 'actorium-mcp']);
+
+    expect(channel.startChannel).toHaveBeenCalledWith(
+      expect.objectContaining({ bffUrl: 'http://localhost:8090' }),
+    );
+  });
+
+  it('does not start the review channel for the pair subcommand', async () => {
+    await runCli(['node', 'actorium-mcp', 'pair']);
+
+    expect(channel.startChannel).not.toHaveBeenCalled();
   });
 });
