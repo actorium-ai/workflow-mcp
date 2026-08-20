@@ -1,3 +1,17 @@
+/**
+ * Credential precedence for read-only MCP tools (see config.ts):
+ *
+ *   1. the extension's credential file (`auth.<hash>.json`) — this module;
+ *   2. the pairing credential file (`pairing.<hash>.json`) — pairingStore.ts;
+ *   3. the `WORKFLOW_TOKEN` env var.
+ *
+ * The `pair` subcommand, the review channel, and the review tools use
+ * `pairing.<hash>.json` only — it identifies the paired local-agent
+ * participant, whereas `auth.<hash>.json` identifies the developer's own user
+ * token. The two files coexist per backend (same sha256-of-`bffUrl` hash
+ * derivation, distinct filename prefix) so pairing never clobbers the file
+ * the workflow-extension VS Code extension writes.
+ */
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
