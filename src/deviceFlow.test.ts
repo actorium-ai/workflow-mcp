@@ -1,5 +1,4 @@
 import {
-  DeviceFlowError,
   exchange,
   pollAndExchange,
   refresh,
