@@ -4,12 +4,14 @@ import * as path from 'path';
 
 import {
   consumeSseStream,
+  expiryFromAccessToken,
   parseSseData,
   participantIdFromAccessToken,
+  resolveFreshParticipant,
   resolveParticipant,
   startChannel,
 } from './channel';
-import { savePairing } from './pairingStore';
+import { loadPairing, savePairing } from './pairingStore';
 
 const BFF = 'http://bff.example.com';
 const CONFIG = { bffUrl: BFF };
@@ -187,6 +189,95 @@ describe('resolveParticipant', () => {
   });
 });
 
+describe('resolveFreshParticipant', () => {
+  let tempHome: string;
+
+  const FRESH_TOKEN = makeAccessToken({
+    agent_participant_id: 'participant-123',
+    exp: 4_000,
+  });
+  const EXPIRING_TOKEN = makeAccessToken({
+    agent_participant_id: 'participant-123',
+    exp: 1_030,
+  });
+  const RENEWED_TOKEN = makeAccessToken({
+    agent_participant_id: 'participant-456',
+    exp: 9_000,
+  });
+
+  // 1_000_000ms == exp 1_000s, so EXPIRING_TOKEN has 30s left (inside the skew)
+  // and FRESH_TOKEN has ~50min (outside it).
+  const now = (): number => 1_000_000;
+
+  beforeEach(() => {
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'actorium-fresh-test-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  it('returns null when there is no pairing', async () => {
+    const refresh = jest.fn();
+    const result = await resolveFreshParticipant(CONFIG, { homeDir: tempHome, refresh, now });
+    expect(result).toBeNull();
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('uses the stored token without refreshing when it is not near expiry', async () => {
+    writePairing(tempHome, FRESH_TOKEN);
+    const refresh = jest.fn();
+
+    const result = await resolveFreshParticipant(CONFIG, { homeDir: tempHome, refresh, now });
+
+    expect(refresh).not.toHaveBeenCalled();
+    expect(result).toEqual({ participantId: 'participant-123', accessToken: FRESH_TOKEN });
+  });
+
+  it('renews and persists both tokens when the access token is near expiry', async () => {
+    writePairing(tempHome, EXPIRING_TOKEN);
+    const refresh = jest.fn().mockResolvedValue({
+      access_token: RENEWED_TOKEN,
+      refresh_token: 'refresh-2',
+      token_type: 'Bearer',
+      expires_in: 3600,
+    });
+
+    const result = await resolveFreshParticipant(CONFIG, { homeDir: tempHome, refresh, now });
+
+    // client_id must be sent: the BFF routes to the pairing store on it
+    expect(refresh).toHaveBeenCalledWith(BFF, 'refresh-1', 'actorium-local-agent');
+    expect(result).toEqual({ participantId: 'participant-456', accessToken: RENEWED_TOKEN });
+
+    // the rotated refresh token is persisted — the old one is single-use
+    const stored = loadPairing(BFF, tempHome);
+    expect(stored?.accessToken).toBe(RENEWED_TOKEN);
+    expect(stored?.refreshToken).toBe('refresh-2');
+  });
+
+  it('falls back to the stored token when renewal fails', async () => {
+    writePairing(tempHome, EXPIRING_TOKEN);
+    const refresh = jest.fn().mockRejectedValue(new Error('offline'));
+
+    const result = await resolveFreshParticipant(CONFIG, { homeDir: tempHome, refresh, now });
+
+    // the server's own 401 is the accurate signal — don't guess locally
+    expect(result).toEqual({ participantId: 'participant-123', accessToken: EXPIRING_TOKEN });
+    expect(loadPairing(BFF, tempHome)?.refreshToken).toBe('refresh-1');
+  });
+});
+
+describe('expiryFromAccessToken', () => {
+  it('returns the exp claim in milliseconds', () => {
+    expect(expiryFromAccessToken(makeAccessToken({ exp: 1_700 }))).toBe(1_700_000);
+  });
+
+  it('returns null when there is no numeric exp', () => {
+    expect(expiryFromAccessToken(makeAccessToken({}))).toBeNull();
+    expect(expiryFromAccessToken('not-a-jwt')).toBeNull();
+  });
+});
+
 describe('startChannel', () => {
   let tempHome: string;
   let mockFetch: jest.Mock;
@@ -215,11 +306,15 @@ describe('startChannel', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('subscribes to the participant SSE event stream with the pairing auth', () => {
+  it('subscribes to the participant SSE event stream with the pairing auth', async () => {
     writePairing(tempHome);
 
     const handle = startChannel(CONFIG, { homeDir: tempHome, ...fetchOptions() });
     expect(handle).not.toBeNull();
+
+    // The subscription resolves a fresh token before opening the stream, so the
+    // fetch lands a few microtasks after startChannel returns rather than inline.
+    await new Promise((resolve) => setImmediate(resolve));
 
     const eventsCalls = callsTo('/events');
     expect(eventsCalls).toHaveLength(1);

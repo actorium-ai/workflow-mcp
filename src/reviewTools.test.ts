@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { registerReviewTools, reviewGetTurn, reviewSubmitReply } from './reviewTools';
+import { registerReviewTools, reviewGetTurn, reviewStart, reviewSubmitReply } from './reviewTools';
 import { savePairing } from './pairingStore';
 
 const BFF = 'http://bff.example.com';
@@ -185,14 +185,118 @@ describe('registerReviewTools', () => {
 
     expect(Object.keys(tools)).toEqual(expect.arrayContaining(['review_get_turn', 'review_submit_reply']));
 
-    expect(tools['review_get_turn']?.description).toBe(
-      "Poll for a review turn owed to this paired agent. Run when the review view shows 'awaiting <handle>'.",
-    );
+    // The description carries the polling contract, since that is what the
+    // calling model reads to decide whether to wait or give up.
+    const getTurnDescription = tools['review_get_turn']?.description ?? '';
+    expect(getTurnDescription).toContain('review turn is owed');
+    expect(getTurnDescription).toMatch(/keep calling|call.*again/i);
+    expect(getTurnDescription).toMatch(/stop when/i);
     expect(tools['review_get_turn']?.annotations?.readOnlyHint).toBe(true);
 
-    expect(tools['review_submit_reply']?.description).toBe(
-      "Post this agent's reply into the review conversation (author derived server-side).",
-    );
+    // The description carries the loop obligation: agents were posting a reply
+    // and then asking the human whether to continue, stranding the exchange.
+    const submitDescription = tools['review_submit_reply']?.description ?? '';
+    expect(submitDescription).toContain('author derived server-side');
+    expect(submitDescription).toMatch(/review_get_turn/);
+    expect(submitDescription).toMatch(/do not ask the human/i);
     expect(tools['review_submit_reply']?.annotations?.readOnlyHint).toBe(false);
+  });
+});
+
+describe('reviewStart turn order', () => {
+  let tempHome: string;
+
+  beforeEach(() => {
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'actorium-start-test-'));
+    writePairing(tempHome);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  function okFetch() {
+    return jest.fn().mockResolvedValue(makeResponse(200, { session_id: 's-1' }));
+  }
+
+  async function startWith(overrides: Record<string, unknown> = {}) {
+    const fetchImpl = okFetch();
+    await reviewStart(
+      CONFIG,
+      { initial_prompt: 'review it', feature_id: 'f-1', hermes_model_id: 'm-1', workspace_id: 'ws-1', ...overrides },
+      { homeDir: tempHome, fetch: fetchImpl as unknown as typeof fetch },
+    );
+    return JSON.parse((fetchImpl.mock.calls[0][1] as RequestInit).body as string);
+  }
+
+  // The loop is reviewer-first: findings, then hermes updates the documents,
+  // then the reviewer re-checks. Seeding hermes first asks it to change
+  // documents before anyone has said what is wrong with them.
+  it('defaults the first turn to this agent, not hermes', async () => {
+    const body = await startWith();
+    expect(body.first_responder).toBe('participant-123');
+    expect(body.first_responder).not.toBe('hermes');
+  });
+
+  it('honours an explicit first_responder', async () => {
+    const body = await startWith({ first_responder: 'hermes' });
+    expect(body.first_responder).toBe('hermes');
+  });
+
+  // Broader quoting is the human's consent decision; the default must be off.
+  it('defaults allow_broader_code_quoting to false', async () => {
+    const body = await startWith();
+    expect(body.allow_broader_code_quoting).toBe(false);
+  });
+});
+
+describe('reviewGetTurn wait hints', () => {
+  let tempHome: string;
+
+  beforeEach(() => {
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'actorium-hint-test-'));
+    writePairing(tempHome);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  async function hintFor(body: unknown): Promise<string> {
+    const fetchImpl = jest.fn().mockResolvedValue(makeResponse(200, body));
+    const result = await reviewGetTurn(CONFIG, {
+      homeDir: tempHome,
+      fetch: fetchImpl as unknown as typeof fetch,
+    });
+    const text = (result.content?.[0] as { text: string }).text;
+    return (JSON.parse(text) as { hint?: string }).hint ?? '';
+  }
+
+  it('tells the agent to keep waiting while the review is live', async () => {
+    expect(await hintFor({ pending: false, review_active: true, awaiting_human: false })).toMatch(/wait/i);
+  });
+
+  it('tells the agent to stop once the review has ended', async () => {
+    expect(await hintFor({ pending: false, review_active: false, awaiting_human: false })).toMatch(/ended/i);
+  });
+
+  // Polling through this just burns the idle bound and kills the review while
+  // the question sits unanswered on screen.
+  it('tells the agent to surface a question waiting on the human', async () => {
+    const hint = await hintFor({ pending: false, review_active: true, awaiting_human: true });
+    expect(hint).toMatch(/blocked/i);
+    expect(hint).toMatch(/human/i);
+    expect(hint).toMatch(/stop polling/i);
+  });
+
+  it('leaves an actual turn untouched', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue(makeResponse(200, { turn: { session_id: 's-1' } }));
+    const result = await reviewGetTurn(CONFIG, {
+      homeDir: tempHome,
+      fetch: fetchImpl as unknown as typeof fetch,
+    });
+    const body = JSON.parse((result.content?.[0] as { text: string }).text);
+    expect(body.turn).toEqual({ session_id: 's-1' });
+    expect(body.hint).toBeUndefined();
   });
 });

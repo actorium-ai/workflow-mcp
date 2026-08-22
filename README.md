@@ -21,6 +21,45 @@ package's version and exits immediately, without starting the MCP server. The Ac
 Code extension uses this to detect whether the CLI is installed and to compare it against the
 backend's minimum supported version.
 
+### Pairing a local agent
+
+`actorium-mcp pair` registers this machine's coding agent as an addressable chat
+participant for spec review, then exits.
+
+```sh
+actorium-mcp pair --api-url http://localhost:8090 --handle claude-reviewer
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--api-url <url>` | **required** | Backend to pair against |
+| `--handle <name>` | your OS username | The `@handle` the agent is addressed by |
+| `--no-open` | — | Don't open the approval page in a browser |
+
+Every run starts a fresh grant and supersedes the previous pairing. It does not
+reuse a cached credential: the pairing file and the server can disagree (a
+credential can outlive the record it was issued against), and short-circuiting
+on the local file turned `pair` into a silent no-op with no way to recover.
+
+**`--api-url` is required and must match the `API_URL` the MCP server runs
+with.** The pairing credential is stored in a file keyed by a hash of the
+backend url, so a pairing made against one backend is invisible to a server
+running against another: the server finds no pairing, never sends a presence
+heartbeat, and the review UI reports *"paired but unreachable"* — with nothing
+pointing at the real cause. It is deliberately not defaulted from `API_URL` or
+localhost, since an inferred backend is exactly what makes that mismatch easy to
+hit and impossible to see. `pair` prints the backend it used, and the server
+warns on stderr at startup when it has no pairing for its own `API_URL`.
+
+The exact command for a given deployment, with its backend url already filled
+in, is shown in **Settings → Local agent**.
+
+Pairing is not the same as running. Presence heartbeats come from the MCP
+**server** process (`actorium-mcp` with no subcommand), which your coding agent
+spawns over stdio — it is not something to run by hand in a terminal, where it
+will simply sit waiting on stdin. Until that server is running, a review cannot
+start.
+
 ### Default workspace/org resolution
 
 Every tool's optional `workspace_id` (and `list_workspaces`'s `org_id`) falls back to a default

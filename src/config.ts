@@ -16,7 +16,13 @@ export interface Config {
   defaultOrgId?: string;
 }
 
-const DEFAULT_BFF_URL = 'http://localhost:8090';
+export const DEFAULT_BFF_URL = 'http://localhost:8090';
+
+/** Overrides applied on top of the environment, for callers that resolve the
+ * backend themselves (the `pair` subcommand's --api-url flag). */
+export interface ConfigOverrides {
+  bffUrl?: string;
+}
 
 /**
  * Precedence: explicit WORKFLOW_TOKEN env var first (back-compat, and what
@@ -36,8 +42,8 @@ const DEFAULT_BFF_URL = 'http://localhost:8090';
  * directly, which stays correct regardless of what any other window/process
  * is doing.
  */
-export function loadConfig(): Config {
-  const bffUrl = process.env.API_URL ?? DEFAULT_BFF_URL;
+export function loadConfig(overrides: ConfigOverrides = {}): Config {
+  const bffUrl = overrides.bffUrl ?? process.env.API_URL ?? DEFAULT_BFF_URL;
   const envBearerToken = process.env.WORKFLOW_TOKEN;
   const cwdWorkspace = findWorkspaceManifest();
 

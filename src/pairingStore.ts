@@ -100,3 +100,38 @@ export function savePairing(
   // keep its old mode across a save.
   fs.chmodSync(filePath, FILE_MODE);
 }
+
+/**
+ * Lists every pairing this machine holds, newest first.
+ *
+ * Pairings are per-backend by design — the file name is derived from the
+ * backend url (see pairingPath), so one machine can be paired to a local
+ * stack, a staging deployment and production at the same time without them
+ * colliding. The cost of that is invisibility: nothing else surfaces which
+ * backends you are actually paired to, which is how "pair succeeded but the
+ * agent never comes online" (pairing and MCP server on different backends)
+ * goes unnoticed. Unreadable/foreign files in the directory are skipped.
+ */
+export function listPairings(homeDir: string = os.homedir()): PairingCredentials[] {
+  const dir = path.join(homeDir, '.actorium');
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+
+  const out: PairingCredentials[] = [];
+  for (const name of names) {
+    if (!name.startsWith('pairing.') || !name.endsWith('.json')) continue;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')) as Partial<PairingCredentials>;
+      if (typeof parsed.accessToken !== 'string' || !parsed.accessToken) continue;
+      if (typeof parsed.bffUrl !== 'string' || !parsed.bffUrl) continue;
+      out.push(parsed as PairingCredentials);
+    } catch {
+      // not ours, or unreadable — skip rather than fail the whole listing
+    }
+  }
+  return out.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+}

@@ -66,14 +66,14 @@ describe('deviceFlow', () => {
   });
 
   describe('exchange', () => {
-    it('POSTs the device-code grant to /oauth/device/token', async () => {
+    it('POSTs the device-code grant to /oauth/token', async () => {
       mockFetch.mockResolvedValueOnce(makeResponse(200, TOKENS));
 
       const result = await exchange(BFF, 'device-code-1', 'actorium-local-agent');
 
       expect(result).toEqual(TOKENS);
       const [url, init] = mockFetch.mock.calls[0];
-      expect(url).toBe(`${BFF}/oauth/device/token`);
+      expect(url).toBe(`${BFF}/oauth/token`);
       expect(JSON.parse(init.body)).toEqual({
         grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
         device_code: 'device-code-1',
@@ -83,17 +83,20 @@ describe('deviceFlow', () => {
   });
 
   describe('refresh', () => {
-    it('POSTs grant_type=refresh_token with the refresh token', async () => {
+    it('POSTs grant_type=refresh_token with the refresh token and client_id', async () => {
       mockFetch.mockResolvedValueOnce(makeResponse(200, TOKENS));
 
       const result = await refresh(BFF, 'refresh-1');
 
       expect(result).toEqual(TOKENS);
       const [url, init] = mockFetch.mock.calls[0];
-      expect(url).toBe(`${BFF}/oauth/device/token`);
+      expect(url).toBe(`${BFF}/oauth/token`);
+      // client_id is what routes the refresh to the pairing store server-side;
+      // without it the BFF rejects the body and never reaches that branch.
       expect(JSON.parse(init.body)).toEqual({
         grant_type: 'refresh_token',
         refresh_token: 'refresh-1',
+        client_id: 'actorium-local-agent',
       });
     });
   });

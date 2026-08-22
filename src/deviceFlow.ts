@@ -6,8 +6,8 @@
  * UI at `/device-authorize` is the approval side only. Endpoints are served
  * by the workflow BFF directly (not proxied through another upstream):
  *
- *   POST /oauth/device        — issue device_code / user_code
- *   POST /oauth/device/token  — exchange device_code (or refresh_token)
+ *   POST /oauth/device  — issue device_code / user_code
+ *   POST /oauth/token   — exchange device_code (or refresh_token)
  */
 
 /** `client_id` identifying this pairing client to the device grant. */
@@ -101,12 +101,12 @@ export async function start(bffUrl: string, options: StartDeviceFlowOptions): Pr
 }
 
 /**
- * Exchanges a `device_code` for tokens: POST /oauth/device/token.
+ * Exchanges a `device_code` for tokens: POST /oauth/token.
  * Throws a DeviceFlowError carrying the OAuth `error` code while the grant is
  * pending/denied/expired (see pollAndExchange, which retries the pending case).
  */
 export async function exchange(bffUrl: string, deviceCode: string, clientId: string): Promise<TokenResponse> {
-  return postJson<TokenResponse>(`${baseUrl(bffUrl)}/oauth/device/token`, {
+  return postJson<TokenResponse>(`${baseUrl(bffUrl)}/oauth/token`, {
     grant_type: DEVICE_CODE_GRANT_TYPE,
     device_code: deviceCode,
     client_id: clientId,
@@ -114,14 +114,23 @@ export async function exchange(bffUrl: string, deviceCode: string, clientId: str
 }
 
 /**
- * Refreshes an expired/expiring access token: POST /oauth/device/token with
+ * Refreshes an expired/expiring access token: POST /oauth/token with
  * grant_type=refresh_token. Revocation is checked server-side here (a revoked
  * refresh token yields `invalid_grant`).
+ *
+ * `client_id` is required: the BFF binds it on every token request and routes
+ * refreshes to the pairing store only when it matches PAIRING_CLIENT_ID —
+ * omitting it lands in the browser-session store and answers invalid_grant.
  */
-export async function refresh(bffUrl: string, refreshToken: string): Promise<TokenResponse> {
-  return postJson<TokenResponse>(`${baseUrl(bffUrl)}/oauth/device/token`, {
+export async function refresh(
+  bffUrl: string,
+  refreshToken: string,
+  clientId: string = PAIRING_CLIENT_ID,
+): Promise<TokenResponse> {
+  return postJson<TokenResponse>(`${baseUrl(bffUrl)}/oauth/token`, {
     grant_type: REFRESH_GRANT_TYPE,
     refresh_token: refreshToken,
+    client_id: clientId,
   });
 }
 

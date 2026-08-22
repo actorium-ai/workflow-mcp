@@ -1,7 +1,8 @@
 import * as os from 'os';
 
 import { Config } from './config.js';
-import { loadPairing } from './pairingStore.js';
+import { PAIRING_CLIENT_ID, refresh as refreshGrant } from './deviceFlow.js';
+import { loadPairing, savePairing } from './pairingStore.js';
 
 /**
  * The paired local agent holds a "channel" to workflow-chat-agent while the
@@ -20,6 +21,17 @@ const HERMES_AGENT_PREFIX = '/bff/hermes-agent/api/v1';
  */
 export const PRESENCE_HEARTBEAT_MS = 30_000;
 
+/**
+ * Renew the access token once it has less than this long to live. The pairing
+ * client's TTL is deliberately short (1h — see devicejwt.TokenTTLFor), so a
+ * server left running past that must re-mint or every authenticated call it
+ * makes starts failing.
+ */
+export const TOKEN_REFRESH_SKEW_MS = 120_000;
+
+/** Delay before re-opening a dropped SSE subscription. */
+const SSE_RECONNECT_DELAY_MS = 5_000;
+
 export interface ChannelOptions {
   /** Presence heartbeat cadence in ms (default PRESENCE_HEARTBEAT_MS). */
   heartbeatMs?: number;
@@ -29,6 +41,10 @@ export interface ChannelOptions {
   fetch?: typeof fetch;
   /** Receives each parsed SSE event (best-effort wake hint). Default: no-op. */
   onEvent?: (event: unknown) => void;
+  /** Device-flow refresh seam for tests (default deviceFlow.refresh). */
+  refresh?: typeof refreshGrant;
+  /** SSE reconnect delay in ms (default SSE_RECONNECT_DELAY_MS). */
+  reconnectMs?: number;
 }
 
 export interface ChannelHandle {
@@ -60,6 +76,25 @@ export function participantIdFromAccessToken(accessToken: string): string | null
   }
 }
 
+/**
+ * Reads the `exp` claim (ms since epoch) out of a pairing access token, without
+ * signature verification — same rationale as participantIdFromAccessToken. Used
+ * only to decide when to renew locally; the server remains the authority on
+ * whether a token is actually still valid. Returns null when the token is
+ * malformed or carries no numeric `exp`.
+ */
+export function expiryFromAccessToken(accessToken: string): number | null {
+  const parts = accessToken.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const payload = JSON.parse(base64UrlDecode(parts[1])) as Record<string, unknown>;
+    const exp = payload['exp'];
+    return typeof exp === 'number' ? exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The paired identity a channel/review tool acts as. */
 export interface ResolvedParticipant {
   participantId: string;
@@ -79,6 +114,71 @@ export function resolveParticipant(config: Config, homeDir?: string): ResolvedPa
   const participantId = participantIdFromAccessToken(pairing.accessToken);
   if (!participantId) return null;
   return { participantId, accessToken: pairing.accessToken };
+}
+
+/** Seams for resolveFreshParticipant; all default to the real implementations. */
+export interface FreshParticipantOptions {
+  /** Home-dir seam for locating the pairing file (default os.homedir()). */
+  homeDir?: string;
+  /** Device-flow refresh seam for tests (default deviceFlow.refresh). */
+  refresh?: typeof refreshGrant;
+  /** Clock seam for tests (default Date.now). */
+  now?: () => number;
+}
+
+/**
+ * Resolves the paired participant, renewing the access token first when it has
+ * expired or is about to. This is what keeps a long-lived MCP server usable:
+ * the pairing token lives only an hour, so without renewal the presence
+ * heartbeat, the SSE subscription and every review tool start 401ing once the
+ * server has been up that long — silently, since the channel swallows errors
+ * by design. A successful renewal is persisted (rotating the refresh token
+ * with it, which the BFF requires) so the next process starts fresh too.
+ *
+ * Falls back to the stored token when renewal fails — offline, or a revoked
+ * pairing. The caller then gets the server's own 401, which is the accurate
+ * signal; guessing locally would turn a transient outage into a false unpair.
+ */
+export async function resolveFreshParticipant(
+  config: Config,
+  options: FreshParticipantOptions = {},
+): Promise<ResolvedParticipant | null> {
+  const homeDir = options.homeDir ?? os.homedir();
+  const pairing = loadPairing(config.bffUrl, homeDir);
+  if (!pairing) return null;
+
+  const now = options.now ?? Date.now;
+  const expiresAt = expiryFromAccessToken(pairing.accessToken);
+  let accessToken = pairing.accessToken;
+
+  if (expiresAt !== null && expiresAt - now() <= TOKEN_REFRESH_SKEW_MS) {
+    try {
+      const tokens = await (options.refresh ?? refreshGrant)(
+        config.bffUrl,
+        pairing.refreshToken,
+        pairing.clientId ?? PAIRING_CLIENT_ID,
+      );
+      accessToken = tokens.access_token;
+      savePairing(
+        config.bffUrl,
+        {
+          ...pairing,
+          accessToken: tokens.access_token,
+          refreshToken: tokens.refresh_token,
+          expiresIn: tokens.expires_in,
+          tokenType: tokens.token_type,
+          updatedAt: now(),
+        },
+        homeDir,
+      );
+    } catch {
+      // keep the stored token — see the doc comment above
+    }
+  }
+
+  const participantId = participantIdFromAccessToken(accessToken);
+  if (!participantId) return null;
+  return { participantId, accessToken };
 }
 
 function isAbortError(err: unknown): boolean {
@@ -149,14 +249,21 @@ export async function consumeSseStream(
   }
 }
 
+/**
+ * Opens the SSE subscription once and reads it to completion. `authorize` is
+ * called per attempt rather than once per channel so a reconnect after the
+ * hourly token expiry carries a renewed token.
+ */
 async function subscribeEvents(
   fetchImpl: typeof fetch,
   url: string,
-  headers: Record<string, string>,
+  authorize: () => Promise<Record<string, string> | null>,
   signal: AbortSignal,
   onEvent: (event: unknown) => void,
 ): Promise<void> {
   try {
+    const headers = await authorize();
+    if (!headers) return;
     const response = await fetchImpl(url, {
       method: 'GET',
       headers: { Accept: 'text/event-stream', ...headers },
@@ -169,6 +276,44 @@ async function subscribeEvents(
       // dropped before the stream opened — best-effort hint channel
     }
   }
+}
+
+/**
+ * Keeps the SSE subscription open for the life of the channel, re-opening it
+ * after each drop until the channel is stopped. Without this the stream is a
+ * one-shot: the first drop (a proxy idle timeout, a deploy, or the 401 that
+ * follows token expiry) would silently end the wake hints for the rest of the
+ * process's life.
+ */
+async function subscribeWithReconnect(
+  fetchImpl: typeof fetch,
+  url: string,
+  authorize: () => Promise<Record<string, string> | null>,
+  signal: AbortSignal,
+  onEvent: (event: unknown) => void,
+  reconnectMs: number,
+): Promise<void> {
+  while (!signal.aborted) {
+    await subscribeEvents(fetchImpl, url, authorize, signal, onEvent);
+    if (signal.aborted) return;
+    await sleepUnlessAborted(reconnectMs, signal);
+  }
+}
+
+function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    // The reconnect backoff must never be the reason the process stays alive —
+    // an idle agent should exit when its work is done, not linger for a hint
+    // channel. (unref is absent under jest's fake timers.)
+    timer.unref?.();
+    signal.addEventListener('abort', done, { once: true });
+    function done(): void {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    }
+  });
 }
 
 /**
@@ -188,14 +333,27 @@ export function startChannel(config: Config, options: ChannelOptions = {}): Chan
 
   const baseUrl = config.bffUrl.replace(/\/$/, '');
   const participantId = encodeURIComponent(participant.participantId);
-  const authHeaders = { Authorization: `Bearer ${participant.accessToken}` };
 
   const presenceUrl = `${baseUrl}${HERMES_AGENT_PREFIX}/participants/${participantId}/presence`;
   const eventsUrl = `${baseUrl}${HERMES_AGENT_PREFIX}/participants/${participantId}/events`;
 
+  // Resolved per request, not captured once: the pairing token expires after an
+  // hour, so a channel that reused the startup token would go quietly dead on a
+  // server that stays up longer than that.
+  const authorize = async (): Promise<Record<string, string> | null> => {
+    const fresh = await resolveFreshParticipant(config, {
+      homeDir: options.homeDir,
+      refresh: options.refresh,
+    });
+    if (!fresh) return null;
+    return { Authorization: `Bearer ${fresh.accessToken}` };
+  };
+
   const heartbeat = async (): Promise<void> => {
     try {
-      await fetchImpl(presenceUrl, { method: 'POST', headers: authHeaders });
+      const headers = await authorize();
+      if (!headers) return;
+      await fetchImpl(presenceUrl, { method: 'POST', headers });
     } catch {
       // best-effort: a failed heartbeat simply lets the presence lease lapse
     }
@@ -206,7 +364,14 @@ export function startChannel(config: Config, options: ChannelOptions = {}): Chan
   }, heartbeatMs);
 
   const controller = new AbortController();
-  void subscribeEvents(fetchImpl, eventsUrl, authHeaders, controller.signal, onEvent);
+  void subscribeWithReconnect(
+    fetchImpl,
+    eventsUrl,
+    authorize,
+    controller.signal,
+    onEvent,
+    options.reconnectMs ?? SSE_RECONNECT_DELAY_MS,
+  );
 
   let stopped = false;
   return {

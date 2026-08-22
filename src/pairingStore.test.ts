@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { credentialFilePath } from './authFile';
-import { loadPairing, pairingPath, savePairing } from './pairingStore';
+import { listPairings, loadPairing, PairingCredentials, pairingPath, savePairing } from './pairingStore';
 
 /** Independent re-derivation of the filename hash — same derivation as
  * authFile.ts (sha256 of bffUrl, first 16 hex chars) with the pairing prefix. */
@@ -118,5 +118,66 @@ describe('pairingStore', () => {
 
       expect(loadPairing(PROD_URL, tempHome)).toBeNull();
     });
+  });
+});
+
+describe('listPairings', () => {
+  let tempHome: string;
+
+  beforeEach(() => {
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'actorium-list-test-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  function creds(bffUrl: string, handle: string, updatedAt: number): PairingCredentials {
+    return {
+      accessToken: 'access-1',
+      refreshToken: 'refresh-1',
+      expiresIn: 3600,
+      handle,
+      clientId: 'actorium-local-agent',
+      bffUrl,
+      updatedAt,
+    };
+  }
+
+  it('returns an empty list when nothing is paired', () => {
+    expect(listPairings(tempHome)).toEqual([]);
+  });
+
+  it('returns an empty list when the directory does not exist', () => {
+    expect(listPairings(path.join(tempHome, 'nope'))).toEqual([]);
+  });
+
+  // Pairings are per-backend by design; this is what makes that visible.
+  it('lists one pairing per backend, newest first', () => {
+    savePairing('http://localhost:8090', creds('http://localhost:8090', 'local', 1000), tempHome);
+    savePairing('https://api.example.com', creds('https://api.example.com', 'prod', 3000), tempHome);
+    savePairing('https://staging.example.com', creds('https://staging.example.com', 'staging', 2000), tempHome);
+
+    const all = listPairings(tempHome);
+
+    expect(all.map((p) => p.handle)).toEqual(['prod', 'staging', 'local']);
+    expect(all.map((p) => p.bffUrl)).toEqual([
+      'https://api.example.com',
+      'https://staging.example.com',
+      'http://localhost:8090',
+    ]);
+  });
+
+  it('skips unrelated and unreadable files rather than failing the listing', () => {
+    savePairing('http://localhost:8090', creds('http://localhost:8090', 'local', 1000), tempHome);
+    const dir = path.join(tempHome, '.actorium');
+    fs.writeFileSync(path.join(dir, 'auth.abc123.json'), '{"accessToken":"x"}');
+    fs.writeFileSync(path.join(dir, 'pairing.broken.json'), 'not json');
+    fs.writeFileSync(path.join(dir, 'notes.txt'), 'hello');
+
+    const all = listPairings(tempHome);
+
+    expect(all).toHaveLength(1);
+    expect(all[0].handle).toBe('local');
   });
 });
