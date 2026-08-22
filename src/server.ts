@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Config } from './config.js';
 import { BffClient } from './bffClient.js';
+import { registerReviewTools } from './reviewTools.js';
 import { registerTools } from './tools.js';
 
 export function createServer(config: Config): McpServer {
@@ -11,6 +12,7 @@ export function createServer(config: Config): McpServer {
 
   const bffClient = new BffClient(config.bffUrl, config.bearerToken);
   registerTools(server, bffClient, config.defaultWorkspaceId, config.defaultOrgId);
+  registerReviewTools(server, config);
 
   return server;
 }
