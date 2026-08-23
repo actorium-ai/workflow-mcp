@@ -383,30 +383,185 @@ const KIND_TO_FILENAME: Record<DocumentKind, string> = {
 
 /**
  * Builds the real storage-service content route:
- * `GET .../documents/content?path=<feature-relative-filename>` — NOT
- * `.../documents/:kind/content` (that route doesn't exist; storage-service's
- * handler.go registers `/documents/content` with `path` as a query param,
- * confirmed directly against the source). Mirrors the Actorium VS Code
- * extension's own toFeatureRelativePath/getDocumentContent (workflow-api.ts).
+ * `.../documents/content?path=<relative-filename>` — NOT `.../documents/:kind/content`
+ * (that route doesn't exist; storage-service's handler.go registers
+ * `/documents/content` with `path` as a query param, confirmed directly against
+ * the source). Mirrors the Actorium VS Code extension's own
+ * toFeatureRelativePath/getDocumentContent (workflow-api.ts).
+ *
+ * featureId omitted/empty targets storage-service's no-`:fid` sibling route — a
+ * document with no owning feature (a workspace-root file, e.g. one uploaded
+ * outside any feature's folder in the Files browser), where path is then
+ * relative to the workspace root instead of a feature folder.
  */
-function documentContentPath(workspaceId: string, featureId: string, kind: DocumentKind): string {
-  const qs = new URLSearchParams({ path: KIND_TO_FILENAME[kind] });
-  return `/bff/storage-service/api/workspaces/${encodeURIComponent(workspaceId)}/features/${encodeURIComponent(featureId)}/documents/content?${qs}`;
+function documentContentUrl(workspaceId: string, featureId: string | undefined, path: string): string {
+  const qs = new URLSearchParams({ path });
+  const base = featureId
+    ? `/bff/storage-service/api/workspaces/${encodeURIComponent(workspaceId)}/features/${encodeURIComponent(featureId)}/documents/content`
+    : `/bff/storage-service/api/workspaces/${encodeURIComponent(workspaceId)}/documents/content`;
+  return `${base}?${qs}`;
+}
+
+/**
+ * Resolves the caller's `kind`/`path` pair (see the read/create/update tools'
+ * shared inputSchema shape) to the single relative path storage-service's
+ * content route needs. `kind` is sugar for the four canonical per-feature
+ * documents (see KIND_TO_FILENAME) — it only makes sense with feature_id set,
+ * since those are always feature-scoped. `path` is the general escape hatch:
+ * any other document, feature-scoped or workspace-root (feature_id omitted).
+ */
+function resolveDocPath(
+  featureId: string | undefined,
+  kind: DocumentKind | undefined,
+  path: string | undefined,
+): { path: string } | { error: ToolResult } {
+  if (kind && path) {
+    return { error: notFoundResult('invalid_args: pass exactly one of kind or path, not both') };
+  }
+  if (!kind && !path) {
+    return {
+      error: notFoundResult(
+        'invalid_args: pass kind (for a canonical feature document) or path (for any other ' +
+          'document, including a workspace-root document with no feature_id)',
+      ),
+    };
+  }
+  if (kind && !featureId) {
+    return {
+      error: notFoundResult(
+        `invalid_args: kind="${kind}" requires feature_id — canonical documents are feature-scoped; ` +
+          'pass path instead for a workspace-root document',
+      ),
+    };
+  }
+  return { path: kind ? KIND_TO_FILENAME[kind] : (path as string) };
+}
+
+/** Human-readable "what/where" for a document_not_found reason string. */
+function docLabel(featureId: string | undefined, kind: DocumentKind | undefined, path: string): string {
+  const where = featureId ? `feature ${featureId}` : 'workspace root';
+  return kind ? `kind="${kind}" in ${where}` : `path="${path}" in ${where}`;
 }
 
 export async function handleReadStorageDocument(
-  args: { workspace_id: string; feature_id: string; kind: DocumentKind },
+  args: { workspace_id: string; feature_id?: string; kind?: DocumentKind; path?: string },
   bffClient: BffClient,
 ): Promise<ToolResult> {
-  const { workspace_id, feature_id, kind } = args;
+  const { workspace_id, feature_id, kind, path } = args;
+  const resolved = resolveDocPath(feature_id, kind, path);
+  if ('error' in resolved) return resolved.error;
   try {
     const response = await bffClient.get<DocumentContentResponse>(
-      documentContentPath(workspace_id, feature_id, kind),
+      documentContentUrl(workspace_id, feature_id, resolved.path),
     );
     return { content: [{ type: 'text', text: response.content }] };
   } catch (err) {
     if (err instanceof BffRequestError && err.status === 404) {
-      return notFoundResult(`document_not_found: kind="${kind}" in feature ${feature_id}`);
+      return notFoundResult(`document_not_found: ${docLabel(feature_id, kind, resolved.path)}`);
+    }
+    return formatBffError(err);
+  }
+}
+
+// ── create_storage_document / update_storage_document ────────────────────────
+
+/** Response shape from storage-service's `toDocResponse` (POST /api/documents/import). */
+export interface StorageDocResponse {
+  id: string;
+  workspace_id: string;
+  feature_id?: string;
+  path: string;
+  current_version_id?: string;
+  created_at: string;
+  deleted_at?: string;
+}
+
+/** Response shape from storage-service's `toVersionResponse`. */
+export interface StorageDocVersionResponse {
+  id: string;
+  document_id: string;
+  snapshot_ref: string;
+  parent_version_id?: string;
+  author: string;
+  source: string;
+  created_at: string;
+  label?: string;
+}
+
+export interface ImportDocumentResponse {
+  document: StorageDocResponse;
+  version: StorageDocVersionResponse;
+}
+
+export interface PutDocumentContentResponse {
+  ok: boolean;
+  version_id: string;
+}
+
+/**
+ * Creates a document with initial content via storage-service's
+ * `POST /api/documents/import` — a single call that both provisions the document row
+ * and seeds its first version, unlike the plain POST /api/documents (used internally
+ * by workflow-backend at feature-creation time), which creates an empty row with no
+ * version. feature_id omitted creates it at the workspace root, with no owning
+ * feature (e.g. a shared file uploaded outside any feature's folder).
+ *
+ * This is create-or-get, NOT upsert: if a document at this path already exists,
+ * storage-service deliberately returns the EXISTING document/version unchanged
+ * rather than overwriting it (see storage-service's importMarkdownAlreadyExists) —
+ * a real edit may have landed on it since, and blindly re-importing would clobber
+ * that. Use update_storage_document to modify an existing document's content.
+ */
+export async function handleCreateStorageDocument(
+  args: { workspace_id: string; feature_id?: string; kind?: DocumentKind; path?: string; content: string },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const { workspace_id, feature_id, kind, path, content } = args;
+  const resolved = resolveDocPath(feature_id, kind, path);
+  if ('error' in resolved) return resolved.error;
+  try {
+    const response = await bffClient.post<ImportDocumentResponse>('/bff/storage-service/api/documents/import', {
+      workspace_id,
+      feature_id: feature_id ?? '',
+      path: resolved.path,
+      content,
+    });
+    return jsonResult({
+      id: response.document.id,
+      path: response.document.path,
+      version_id: response.version.id,
+    });
+  } catch (err) {
+    return formatBffError(err);
+  }
+}
+
+/**
+ * Updates an existing document's content via storage-service's
+ * `PUT .../documents/content?path=...` — creates a new version and makes it current.
+ * feature_id omitted targets a workspace-root document (no owning feature).
+ *
+ * Edit-only: 404s ("document not found") if no document at this path exists yet —
+ * call create_storage_document first.
+ */
+export async function handleUpdateStorageDocument(
+  args: { workspace_id: string; feature_id?: string; kind?: DocumentKind; path?: string; content: string },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const { workspace_id, feature_id, kind, path, content } = args;
+  const resolved = resolveDocPath(feature_id, kind, path);
+  if ('error' in resolved) return resolved.error;
+  try {
+    const response = await bffClient.put<PutDocumentContentResponse>(
+      documentContentUrl(workspace_id, feature_id, resolved.path),
+      { content },
+    );
+    return jsonResult(response);
+  } catch (err) {
+    if (err instanceof BffRequestError && err.status === 404) {
+      return notFoundResult(
+        `document_not_found: ${docLabel(feature_id, kind, resolved.path)} — call create_storage_document first`,
+      );
     }
     return formatBffError(err);
   }
@@ -516,10 +671,12 @@ export function resolveOrgId(
   return { orgId };
 }
 
-/** Every tool this server exposes is a GET with no side effects on an
- * external system — applied uniformly below via registerTool's config
- * object (the current, non-deprecated replacement for the old positional
- * `server.tool(name, description, schema, cb)` overloads). */
+/** Applied via registerTool's config object (the current, non-deprecated
+ * replacement for the old positional `server.tool(name, description, schema,
+ * cb)` overloads) to every tool below with no side effects on an external
+ * system. create_storage_document/update_storage_document are the
+ * exceptions — they get readOnlyHint: false instead (see their own
+ * registerTool calls). */
 const READ_ONLY_ANNOTATIONS = { readOnlyHint: true, openWorldHint: true };
 
 export function registerTools(
@@ -750,18 +907,32 @@ export function registerTools(
     },
   );
 
+  const FEATURE_ID_OPTIONAL_DESCRIPTION =
+    'Feature UUID. Omit for a workspace-root document with no owning feature (e.g. a shared ' +
+    "file uploaded outside any feature's folder) — path is then relative to the workspace " +
+    'root instead of a feature folder.';
+  const KIND_DESCRIPTION =
+    'Canonical per-feature document kind. Mutually exclusive with path, and requires feature_id ' +
+    '(these four are always feature-scoped).';
+  const PATH_DESCRIPTION =
+    'Explicit relative document path (e.g. "notes/design.md") for anything other than the four ' +
+    'canonical kinds — including a workspace-root document (feature_id omitted). Mutually ' +
+    'exclusive with kind. Pass exactly one of kind or path.';
+  const STORAGE_DOC_KIND_ENUM = z.enum(['product_spec', 'technical_design', 'tasks', 'handoff']);
+
   server.registerTool(
     'read_storage_document',
     {
       description:
-        'Read a go-owned feature\'s document content from storage-service. Scoped to go-owned ' +
-        'features only — ts-owned feature documents remain git-backed.',
+        "Read a document's content from storage-service — a go-owned feature's canonical doc (via " +
+        'kind) or any other document, including a workspace-root file with no owning feature (via ' +
+        'path). Scoped to storage-service-backed documents only — a go-owned feature\'s ts-owned ' +
+        'siblings remain git-backed.',
       inputSchema: {
         workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
-        feature_id: z.string().describe('Feature UUID'),
-        kind: z
-          .enum(['product_spec', 'technical_design', 'tasks', 'handoff'])
-          .describe('Document kind to read'),
+        feature_id: z.string().optional().describe(FEATURE_ID_OPTIONAL_DESCRIPTION),
+        kind: STORAGE_DOC_KIND_ENUM.optional().describe(KIND_DESCRIPTION),
+        path: z.string().optional().describe(PATH_DESCRIPTION),
       },
       annotations: READ_ONLY_ANNOTATIONS,
     },
@@ -771,8 +942,78 @@ export function registerTools(
       return handleReadStorageDocument(
         { ...args, workspace_id: resolved.workspaceId } as {
           workspace_id: string;
-          feature_id: string;
-          kind: DocumentKind;
+          feature_id?: string;
+          kind?: DocumentKind;
+          path?: string;
+        },
+        bffClient,
+      );
+    },
+  );
+
+  server.registerTool(
+    'create_storage_document',
+    {
+      description:
+        'Create a document in storage-service, seeding its initial content in one call — a go-owned ' +
+        'feature\'s canonical doc (via kind) or any other document, including a workspace-root file ' +
+        'with no owning feature (via path, feature_id omitted). Create-or-get, not upsert: if a ' +
+        'document at this path already exists, the EXISTING document is returned UNCHANGED — this ' +
+        'never overwrites existing content. Use update_storage_document to modify a document that ' +
+        'already exists.',
+      inputSchema: {
+        workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+        feature_id: z.string().optional().describe(FEATURE_ID_OPTIONAL_DESCRIPTION),
+        kind: STORAGE_DOC_KIND_ENUM.optional().describe(KIND_DESCRIPTION),
+        path: z.string().optional().describe(PATH_DESCRIPTION),
+        content: z.string().describe('Initial markdown content'),
+      },
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    (args) => {
+      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      if ('error' in resolved) return resolved.error;
+      return handleCreateStorageDocument(
+        { ...args, workspace_id: resolved.workspaceId } as {
+          workspace_id: string;
+          feature_id?: string;
+          kind?: DocumentKind;
+          path?: string;
+          content: string;
+        },
+        bffClient,
+      );
+    },
+  );
+
+  server.registerTool(
+    'update_storage_document',
+    {
+      description:
+        "Update an existing document's content in storage-service, creating a new version — a " +
+        'go-owned feature\'s canonical doc (via kind) or any other document, including a ' +
+        'workspace-root file with no owning feature (via path, feature_id omitted). Edit-only — ' +
+        '404s with document_not_found if no document at this path exists yet; call ' +
+        'create_storage_document first.',
+      inputSchema: {
+        workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+        feature_id: z.string().optional().describe(FEATURE_ID_OPTIONAL_DESCRIPTION),
+        kind: STORAGE_DOC_KIND_ENUM.optional().describe(KIND_DESCRIPTION),
+        path: z.string().optional().describe(PATH_DESCRIPTION),
+        content: z.string().describe('New markdown content, replacing the current version'),
+      },
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    (args) => {
+      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      if ('error' in resolved) return resolved.error;
+      return handleUpdateStorageDocument(
+        { ...args, workspace_id: resolved.workspaceId } as {
+          workspace_id: string;
+          feature_id?: string;
+          kind?: DocumentKind;
+          path?: string;
+          content: string;
         },
         bffClient,
       );

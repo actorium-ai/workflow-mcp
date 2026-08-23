@@ -1,8 +1,10 @@
 # actorium-mcp — Agent Usage Guide
 
-Read-only MCP server giving agents full context on the workflow platform: features (with
-bundled docs/tasks/activity), tasks (PR diffs, review threads, execution info), documents, and
-caller identity. No mutation tools — nothing here changes state.
+MCP server giving agents full context on the workflow platform: features (with bundled
+docs/tasks/activity), tasks (PR diffs, review threads, execution info), documents, and caller
+identity. Mostly read-only — the exceptions are the paired-agent spec-review tools (`review_*`)
+and `create_storage_document`/`update_storage_document`, which create or edit a go-owned
+feature's documents in storage-service; everything else only reads state.
 
 ## Prerequisites
 
@@ -57,11 +59,21 @@ list_workspace_repos({ workspace_id }) → repo id/url/default branch/tags, whic
 
 ### `read_storage_document` / `list_workspace_documents` / `get_document_versions`
 
+Every storage-document tool accepts either `kind` (the four canonical per-feature docs, requires
+`feature_id`) or `path` (any other document — a non-canonical feature file, or a workspace-root
+document with no owning feature at all, `feature_id` omitted). Pass exactly one.
+
 ```
 read_storage_document({ feature_id, kind })
-// kind: "product_spec" | "technical_design" | "tasks" | "handoff" — go-owned features only
+// kind: "product_spec" | "technical_design" | "tasks" | "handoff" — canonical per-feature docs
 // success → raw markdown string
 // not found → { ok: false, reason: "document_not_found: kind=\"product_spec\" in feature ..." }
+
+read_storage_document({ path })
+// no feature_id → workspace-root document, e.g. one uploaded outside any feature's folder
+// (pass feature_id alongside path to read a non-canonical file scoped to one feature instead)
+// success → raw markdown string
+// not found → { ok: false, reason: "document_not_found: path=\"shared/notes.md\" in workspace root" }
 
 list_workspace_documents({ feature_id?, limit? })
 // → { documents: [...], truncated } — metadata only (id, path, created_at), no content;
@@ -71,8 +83,27 @@ get_document_versions({ document_id, limit? })
 //   limit default 200, max 1000
 ```
 
-`ts`-owned features' documents remain git-backed and are unaffected by these tools — access them
-via the Claude Code executor's standard clone-and-Read model instead.
+`ts`-owned features' canonical documents remain git-backed and are unaffected by these tools —
+access them via the Claude Code executor's standard clone-and-Read model instead.
+
+### `create_storage_document` / `update_storage_document`
+
+Same `kind`-or-`path` choice as `read_storage_document` above.
+
+```
+create_storage_document({ feature_id, kind, content })          // canonical per-feature doc
+create_storage_document({ path, content })                      // workspace-root document
+create_storage_document({ feature_id, path, content })          // non-canonical feature file
+// create-or-get, NOT upsert: if a document at this path already exists, the EXISTING
+// document is returned unchanged (never overwrites it) — use update_storage_document instead
+// success → { id, path, version_id }
+
+update_storage_document({ feature_id, kind, content })
+update_storage_document({ path, content })                      // workspace-root document
+// edit-only: 404s with document_not_found if no document at this path exists yet —
+// call create_storage_document first
+// success → { ok: true, version_id }
+```
 
 ### `whoami`
 

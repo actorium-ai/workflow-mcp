@@ -11,6 +11,8 @@ import {
   handleListWorkspaceActivity,
   handleListWorkspaceRepos,
   handleReadStorageDocument,
+  handleCreateStorageDocument,
+  handleUpdateStorageDocument,
   handleListWorkspaceDocuments,
   handleGetDocumentVersions,
   handleWhoami,
@@ -20,6 +22,8 @@ import {
   FeaturesResponse,
   FeatureDetailResponse,
   DocumentContentResponse,
+  ImportDocumentResponse,
+  PutDocumentContentResponse,
   DocumentKind,
   ToolResult,
 } from './tools';
@@ -31,6 +35,8 @@ jest.mock('./bffClient', () => {
     BffRequestError: actual.BffRequestError,
     BffClient: jest.fn().mockImplementation(() => ({
       get: jest.fn(),
+      post: jest.fn(),
+      put: jest.fn(),
     })),
   };
 });
@@ -422,6 +428,336 @@ describe('handleReadStorageDocument', () => {
 
     expect(result.isError).toBe(true);
     expect(firstText(result)).toContain('Authentication failed');
+  });
+
+  it('reads a workspace-root document (no feature_id) via path, hitting the no-:fid route', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce({ content: 'shared notes' } as DocumentContentResponse);
+
+    const result = await handleReadStorageDocument({ workspace_id: WS, path: 'shared/notes.md' }, client);
+
+    expect(result.isError).toBeFalsy();
+    expect(firstText(result)).toBe('shared notes');
+    expect(client.get).toHaveBeenCalledWith(
+      `/bff/storage-service/api/workspaces/${WS}/documents/content?path=shared%2Fnotes.md`,
+    );
+  });
+
+  it('reads a feature-scoped non-canonical document via path + feature_id', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce({ content: 'x' } as DocumentContentResponse);
+
+    await handleReadStorageDocument({ workspace_id: WS, feature_id: FID, path: 'notes/design.md' }, client);
+
+    expect(client.get).toHaveBeenCalledWith(
+      `/bff/storage-service/api/workspaces/${WS}/features/${FID}/documents/content?path=notes%2Fdesign.md`,
+    );
+  });
+
+  it('rejects when both kind and path are given', async () => {
+    const client = makeClient();
+
+    const result = await handleReadStorageDocument(
+      { workspace_id: WS, feature_id: FID, kind: KIND, path: 'x.md' },
+      client,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toMatch(/invalid_args/);
+    expect(client.get).not.toHaveBeenCalled();
+  });
+
+  it('rejects when neither kind nor path are given', async () => {
+    const client = makeClient();
+
+    const result = await handleReadStorageDocument({ workspace_id: WS, feature_id: FID }, client);
+
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toMatch(/invalid_args/);
+    expect(client.get).not.toHaveBeenCalled();
+  });
+
+  it('rejects kind without feature_id (canonical docs are feature-scoped)', async () => {
+    const client = makeClient();
+
+    const result = await handleReadStorageDocument({ workspace_id: WS, kind: KIND }, client);
+
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toMatch(/invalid_args/);
+    expect(firstText(result)).toContain('feature_id');
+    expect(client.get).not.toHaveBeenCalled();
+  });
+});
+
+describe('handleCreateStorageDocument', () => {
+  const WS = 'ws-uuid-1';
+  const FID = 'feat-uuid-1';
+  const KIND: DocumentKind = 'technical_design';
+  const CONTENT = '# Technical Design\nContent here';
+
+  function importResponse(): ImportDocumentResponse {
+    return {
+      document: {
+        id: 'doc-uuid-1',
+        workspace_id: WS,
+        feature_id: FID,
+        path: 'tech_design.md',
+        current_version_id: 'ver-uuid-1',
+        created_at: '2026-08-23T00:00:00Z',
+      },
+      version: {
+        id: 'ver-uuid-1',
+        document_id: 'doc-uuid-1',
+        snapshot_ref: 'blob-uuid-1',
+        author: 'user-uuid-1',
+        source: 'import',
+        created_at: '2026-08-23T00:00:00Z',
+      },
+    };
+  }
+
+  it('posts to the import endpoint with the kind mapped to its canonical filename', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockResolvedValueOnce(importResponse());
+
+    await handleCreateStorageDocument({ workspace_id: WS, feature_id: FID, kind: KIND, content: CONTENT }, client);
+
+    expect(client.post).toHaveBeenCalledWith('/bff/storage-service/api/documents/import', {
+      workspace_id: WS,
+      feature_id: FID,
+      path: 'tech_design.md',
+      content: CONTENT,
+    });
+  });
+
+  it('returns the created document id, kind, and version id on success', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockResolvedValueOnce(importResponse());
+
+    const result = await handleCreateStorageDocument(
+      { workspace_id: WS, feature_id: FID, kind: KIND, content: CONTENT },
+      client,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(firstText(result))).toEqual({ id: 'doc-uuid-1', path: 'tech_design.md', version_id: 'ver-uuid-1' });
+  });
+
+  it('returns auth error on BffAuthError', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockRejectedValueOnce(AUTH_ERROR);
+
+    const result = await handleCreateStorageDocument(
+      { workspace_id: WS, feature_id: FID, kind: KIND, content: CONTENT },
+      client,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toContain('Authentication failed');
+  });
+
+  it('returns error on unexpected BFF failure', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockRejectedValueOnce(SERVER_ERROR);
+
+    const result = await handleCreateStorageDocument(
+      { workspace_id: WS, feature_id: FID, kind: KIND, content: CONTENT },
+      client,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toContain('500');
+  });
+
+  it('creates a workspace-root document (no feature_id) via path, sending feature_id: ""', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockResolvedValueOnce({
+      document: {
+        id: 'doc-uuid-2',
+        workspace_id: WS,
+        path: 'shared/notes.md',
+        current_version_id: 'ver-uuid-3',
+        created_at: '2026-08-23T00:00:00Z',
+      },
+      version: {
+        id: 'ver-uuid-3',
+        document_id: 'doc-uuid-2',
+        snapshot_ref: 'blob-uuid-2',
+        author: 'user-uuid-1',
+        source: 'import',
+        created_at: '2026-08-23T00:00:00Z',
+      },
+    } as ImportDocumentResponse);
+
+    const result = await handleCreateStorageDocument(
+      { workspace_id: WS, path: 'shared/notes.md', content: 'hello' },
+      client,
+    );
+
+    expect(client.post).toHaveBeenCalledWith('/bff/storage-service/api/documents/import', {
+      workspace_id: WS,
+      feature_id: '',
+      path: 'shared/notes.md',
+      content: 'hello',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(firstText(result))).toEqual({
+      id: 'doc-uuid-2',
+      path: 'shared/notes.md',
+      version_id: 'ver-uuid-3',
+    });
+  });
+
+  it('rejects when neither kind nor path are given', async () => {
+    const client = makeClient();
+
+    const result = await handleCreateStorageDocument({ workspace_id: WS, feature_id: FID, content: CONTENT }, client);
+
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toMatch(/invalid_args/);
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it('rejects kind without feature_id (canonical docs are feature-scoped)', async () => {
+    const client = makeClient();
+
+    const result = await handleCreateStorageDocument({ workspace_id: WS, kind: KIND, content: CONTENT }, client);
+
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toMatch(/invalid_args/);
+    expect(client.post).not.toHaveBeenCalled();
+  });
+});
+
+describe('handleUpdateStorageDocument', () => {
+  const WS = 'ws-uuid-1';
+  const FID = 'feat-uuid-1';
+  const KIND: DocumentKind = 'product_spec';
+  const CONTENT = '# Product Spec\nUpdated content';
+
+  it('PUTs to the content endpoint — path as a query param, not a `kind` path segment', async () => {
+    const client = makeClient();
+    const resp: PutDocumentContentResponse = { ok: true, version_id: 'ver-uuid-2' };
+    client.put = jest.fn().mockResolvedValueOnce(resp);
+
+    await handleUpdateStorageDocument({ workspace_id: WS, feature_id: FID, kind: KIND, content: CONTENT }, client);
+
+    expect(client.put).toHaveBeenCalledWith(
+      `/bff/storage-service/api/workspaces/${WS}/features/${FID}/documents/content?path=product_spec.md`,
+      { content: CONTENT },
+    );
+  });
+
+  it('returns ok and the new version id on success', async () => {
+    const client = makeClient();
+    const resp: PutDocumentContentResponse = { ok: true, version_id: 'ver-uuid-2' };
+    client.put = jest.fn().mockResolvedValueOnce(resp);
+
+    const result = await handleUpdateStorageDocument(
+      { workspace_id: WS, feature_id: FID, kind: KIND, content: CONTENT },
+      client,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(firstText(result))).toEqual(resp);
+  });
+
+  it('returns document_not_found (with a hint to create first) on 404', async () => {
+    const client = makeClient();
+    client.put = jest.fn().mockRejectedValueOnce(new BffRequestError('404', 404, {}));
+
+    const result = await handleUpdateStorageDocument(
+      { workspace_id: WS, feature_id: FID, kind: KIND, content: CONTENT },
+      client,
+    );
+
+    expect(result.isError).toBe(true);
+    const body = JSON.parse(firstText(result));
+    expect(body.reason).toMatch(/document_not_found/);
+    expect(body.reason).toContain(KIND);
+    expect(body.reason).toContain('create_storage_document');
+  });
+
+  it('returns auth error on BffAuthError', async () => {
+    const client = makeClient();
+    client.put = jest.fn().mockRejectedValueOnce(AUTH_ERROR);
+
+    const result = await handleUpdateStorageDocument(
+      { workspace_id: WS, feature_id: FID, kind: KIND, content: CONTENT },
+      client,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toContain('Authentication failed');
+  });
+
+  it('returns error on unexpected BFF failure', async () => {
+    const client = makeClient();
+    client.put = jest.fn().mockRejectedValueOnce(SERVER_ERROR);
+
+    const result = await handleUpdateStorageDocument(
+      { workspace_id: WS, feature_id: FID, kind: KIND, content: CONTENT },
+      client,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toContain('500');
+  });
+
+  it('updates a workspace-root document (no feature_id) via path, hitting the no-:fid route', async () => {
+    const client = makeClient();
+    const resp: PutDocumentContentResponse = { ok: true, version_id: 'ver-uuid-4' };
+    client.put = jest.fn().mockResolvedValueOnce(resp);
+
+    const result = await handleUpdateStorageDocument(
+      { workspace_id: WS, path: 'shared/notes.md', content: 'updated' },
+      client,
+    );
+
+    expect(client.put).toHaveBeenCalledWith(
+      `/bff/storage-service/api/workspaces/${WS}/documents/content?path=shared%2Fnotes.md`,
+      { content: 'updated' },
+    );
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(firstText(result))).toEqual(resp);
+  });
+
+  it('document_not_found for a path-based document names the path, not a kind', async () => {
+    const client = makeClient();
+    client.put = jest.fn().mockRejectedValueOnce(new BffRequestError('404', 404, {}));
+
+    const result = await handleUpdateStorageDocument(
+      { workspace_id: WS, path: 'shared/notes.md', content: 'updated' },
+      client,
+    );
+
+    expect(result.isError).toBe(true);
+    const body = JSON.parse(firstText(result));
+    expect(body.reason).toContain('path="shared/notes.md"');
+    expect(body.reason).toContain('workspace root');
+  });
+
+  it('rejects when both kind and path are given', async () => {
+    const client = makeClient();
+
+    const result = await handleUpdateStorageDocument(
+      { workspace_id: WS, feature_id: FID, kind: KIND, path: 'x.md', content: CONTENT },
+      client,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toMatch(/invalid_args/);
+    expect(client.put).not.toHaveBeenCalled();
+  });
+
+  it('rejects kind without feature_id (canonical docs are feature-scoped)', async () => {
+    const client = makeClient();
+
+    const result = await handleUpdateStorageDocument({ workspace_id: WS, kind: KIND, content: CONTENT }, client);
+
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toMatch(/invalid_args/);
+    expect(client.put).not.toHaveBeenCalled();
   });
 });
 

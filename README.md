@@ -1,9 +1,11 @@
 # actorium-mcp
 
-Read-only MCP server for Actorium.
-Gives a coding agent full context on features, tasks, PRs, activity, documents, and identity —
-no mutation tools, so it's safe to hand to any agent that only needs to *understand* a workspace,
-not change it.
+MCP server for Actorium.
+Gives a coding agent full context on features, tasks, PRs, activity, documents, and identity.
+Mostly read-only, so it's safe to hand to an agent that only needs to *understand* a workspace —
+the exceptions are the paired-agent spec-review tools (`review_*`) and
+`create_storage_document`/`update_storage_document`, which create or edit a go-owned feature's
+documents.
 
 ## Requirements
 
@@ -208,18 +210,65 @@ and its tags.
 |---|---|---|---|
 | `workspace_id` | string | no | Workspace UUID |
 
+Every storage-document tool below accepts either `kind` (the four canonical per-feature docs,
+requires `feature_id`) or `path` (any other document — a non-canonical feature file, or a
+workspace-root document with no owning feature at all, `feature_id` omitted). Pass exactly one.
+
 ### `read_storage_document`
 
-Read a go-owned feature's document content from storage-service. Scoped to go-owned features
-only — ts-owned feature documents remain git-backed.
+Read a document's content from storage-service — a go-owned feature's canonical doc (via `kind`)
+or any other document, including a workspace-root file with no owning feature (via `path`).
+Scoped to storage-service-backed documents only — a go-owned feature's ts-owned siblings remain
+git-backed.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `workspace_id` | string | no | Workspace UUID |
-| `feature_id` | string | yes | Feature UUID |
-| `kind` | `"product_spec"` \| `"technical_design"` \| `"tasks"` \| `"handoff"` | yes | Document kind to read |
+| `feature_id` | string | no | Feature UUID. Omit for a workspace-root document |
+| `kind` | `"product_spec"` \| `"technical_design"` \| `"tasks"` \| `"handoff"` | one of kind/path | Canonical document kind; requires `feature_id` |
+| `path` | string | one of kind/path | Explicit relative path, e.g. `"notes/design.md"` |
 
-**Errors:** `{ ok: false, reason: "document_not_found: ..." }` on 404.
+**Errors:** `{ ok: false, reason: "document_not_found: ..." }` on 404; `{ ok: false, reason: "invalid_args: ..." }` if kind/path aren't used correctly.
+
+### `create_storage_document`
+
+Create a document in storage-service, seeding its initial content in one call — a go-owned
+feature's canonical doc (via `kind`) or any other document, including a workspace-root file with
+no owning feature (via `path`, `feature_id` omitted). Create-or-get, not upsert: if a document at
+this path already exists, the EXISTING document is returned unchanged — this never overwrites
+existing content. Use `update_storage_document` to modify a document that already exists.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `workspace_id` | string | no | Workspace UUID |
+| `feature_id` | string | no | Feature UUID. Omit for a workspace-root document |
+| `kind` | `"product_spec"` \| `"technical_design"` \| `"tasks"` \| `"handoff"` | one of kind/path | Canonical document kind; requires `feature_id` |
+| `path` | string | one of kind/path | Explicit relative path, e.g. `"notes/design.md"` |
+| `content` | string | yes | Initial markdown content |
+
+**Returns:** `{ id, path, version_id }`.
+
+**Errors:** `{ ok: false, reason: "invalid_args: ..." }` if kind/path aren't used correctly.
+
+### `update_storage_document`
+
+Update an existing document's content in storage-service, creating a new version — a go-owned
+feature's canonical doc (via `kind`) or any other document, including a workspace-root file with
+no owning feature (via `path`, `feature_id` omitted). Edit-only — 404s with
+`document_not_found` if no document at this path exists yet; call `create_storage_document`
+first.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `workspace_id` | string | no | Workspace UUID |
+| `feature_id` | string | no | Feature UUID. Omit for a workspace-root document |
+| `kind` | `"product_spec"` \| `"technical_design"` \| `"tasks"` \| `"handoff"` | one of kind/path | Canonical document kind; requires `feature_id` |
+| `path` | string | one of kind/path | Explicit relative path, e.g. `"notes/design.md"` |
+| `content` | string | yes | New markdown content, replacing the current version |
+
+**Returns:** `{ ok: true, version_id }`.
+
+**Errors:** `{ ok: false, reason: "document_not_found: ..." }` on 404; `{ ok: false, reason: "invalid_args: ..." }` if kind/path aren't used correctly.
 
 ### `list_workspace_documents`
 
@@ -281,6 +330,8 @@ McpServer (MCP TS SDK)
     ├── list_workspace_activity
     ├── list_workspace_repos 
     ├── read_storage_document 
+    ├── create_storage_document 
+    ├── update_storage_document 
     ├── list_workspace_documents
     ├── get_document_versions 
     └── whoami 

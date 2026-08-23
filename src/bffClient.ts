@@ -19,8 +19,7 @@ export class BffRequestError extends Error {
 export class BffClient {
   private readonly bffUrl: string;
   /** Bearer JWT — from WORKFLOW_TOKEN or the shared credential file (see
-   * authFile.ts). There's no read/write split to enforce — every tool this
-   * server exposes is a GET. */
+   * authFile.ts). */
   private readonly bearerToken: string | undefined;
 
   constructor(bffUrl: string, bearerToken?: string) {
@@ -68,5 +67,13 @@ export class BffClient {
 
   async get<T>(path: string): Promise<T> {
     return this.request<T>(path, { method: 'GET' });
+  }
+
+  async post<T>(path: string, body: unknown): Promise<T> {
+    return this.request<T>(path, { method: 'POST', body: JSON.stringify(body) });
+  }
+
+  async put<T>(path: string, body: unknown): Promise<T> {
+    return this.request<T>(path, { method: 'PUT', body: JSON.stringify(body) });
   }
 }

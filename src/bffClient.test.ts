@@ -125,4 +125,30 @@ describe('BffClient', () => {
       expect(result).toEqual({ id: '1' });
     });
   });
+
+  describe('post', () => {
+    it('sends a POST request with a JSON-serialized body', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse(201, { id: '1' }));
+      const client = new BffClient('http://bff.example.com', 'tok');
+      const result = await client.post<{ id: string }>('/api/documents', { path: 'a.md' });
+
+      const [, init] = mockFetch.mock.calls[0];
+      expect(init.method).toBe('POST');
+      expect(init.body).toBe(JSON.stringify({ path: 'a.md' }));
+      expect(result).toEqual({ id: '1' });
+    });
+  });
+
+  describe('put', () => {
+    it('sends a PUT request with a JSON-serialized body', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponse(200, { ok: true }));
+      const client = new BffClient('http://bff.example.com', 'tok');
+      const result = await client.put<{ ok: boolean }>('/api/documents/content?path=a.md', { content: 'hi' });
+
+      const [, init] = mockFetch.mock.calls[0];
+      expect(init.method).toBe('PUT');
+      expect(init.body).toBe(JSON.stringify({ content: 'hi' }));
+      expect(result).toEqual({ ok: true });
+    });
+  });
 });
