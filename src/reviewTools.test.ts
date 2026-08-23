@@ -276,6 +276,43 @@ describe('reviewGetTurn wait hints', () => {
     expect(await hintFor({ pending: false, review_active: true, awaiting_human: false })).toMatch(/wait/i);
   });
 
+  it('names what hermes is doing when the server attaches a status detail', async () => {
+    const hint = await hintFor({
+      pending: false,
+      review_active: true,
+      awaiting_human: false,
+      hermes_status: { working: true, detail: 'reasoning' },
+    });
+    expect(hint).toMatch(/still working \(reasoning\)/i);
+  });
+
+  it('names the running tool when the status detail is a tool label', async () => {
+    const hint = await hintFor({
+      pending: false,
+      review_active: true,
+      awaiting_human: false,
+      hermes_status: { working: true, detail: 'tool:search_docs' },
+    });
+    expect(hint).toMatch(/running tool "search_docs"/i);
+  });
+
+  it('falls back to the generic wait hint when hermes_status has no detail', async () => {
+    const hint = await hintFor({
+      pending: false,
+      review_active: true,
+      awaiting_human: false,
+      hermes_status: { working: true, detail: null },
+    });
+    expect(hint).toMatch(/still working/i);
+    expect(hint).not.toMatch(/\(/);
+  });
+
+  it('falls back to the generic wait hint when hermes_status is absent', async () => {
+    const hint = await hintFor({ pending: false, review_active: true, awaiting_human: false });
+    expect(hint).toMatch(/still working/i);
+    expect(hint).not.toMatch(/\(/);
+  });
+
   it('tells the agent to stop once the review has ended', async () => {
     expect(await hintFor({ pending: false, review_active: false, awaiting_human: false })).toMatch(/ended/i);
   });

@@ -1,6 +1,6 @@
 {
   "name": "@actorium-ai/actorium-mcp",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Read-only MCP server exposing feature/task/document/identity context for Actorium",
   "license": "MIT",
   "type": "commonjs",

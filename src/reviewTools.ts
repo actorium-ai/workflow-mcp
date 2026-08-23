@@ -178,10 +178,30 @@ function withWaitHint(result: ToolResult): ToolResult {
 
   return jsonResult({
     ...payload,
-    hint:
-      'Not yet — the other participant is still working. This is not the end of the review. ' +
-      'Wait ~10s and call review_get_turn again.',
+    hint: `Not yet — ${workingDescription(payload.hermes_status)}. This is not the end of the review. Wait ~10s and call review_get_turn again.`,
   });
+}
+
+/**
+ * Describes the counterpart's activity for the wait hint, from the
+ * best-effort `hermes_status` the server attaches to `pending: false`
+ * (see workflow-chat-agent's participants.pending_turn). Absent or
+ * malformed is expected — it is a label, never a truth signal — so this
+ * always falls back to the generic "still working" phrasing rather than
+ * erroring or going quiet.
+ */
+function workingDescription(hermesStatus: unknown): string {
+  if (!hermesStatus || typeof hermesStatus !== 'object') {
+    return 'the other participant is still working';
+  }
+  const detail = (hermesStatus as Record<string, unknown>).detail;
+  if (typeof detail !== 'string' || !detail) {
+    return 'the other participant is still working';
+  }
+  if (detail.startsWith('tool:')) {
+    return `the other participant is still working (running tool "${detail.slice(5)}")`;
+  }
+  return `the other participant is still working (${detail})`;
 }
 
 /**
