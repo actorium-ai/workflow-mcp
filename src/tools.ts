@@ -622,6 +622,64 @@ export async function handleWhoami(bffClient: BffClient): Promise<ToolResult> {
   }
 }
 
+// ── update_feature_stage ──────────────────────────────────────────────────────
+
+export type StageAction = 'approve' | 'reject' | 'reopen';
+
+export interface StageTransitionResponse {
+  ok: boolean;
+  feature_id?: string;
+  stage?: string;
+  action?: string;
+  review_status?: string;
+  feature_status?: string;
+  current_stage?: string;
+  commit_sha?: string;
+  branch?: string | null;
+  activated_tasks?: string[];
+  // Present instead of a normal success body when the feature is still in
+  // `backlog` — approving a design cannot happen from Backlog (mirrors this
+  // workspace's own "Backlog → In Design" rule). Not an error: the caller
+  // must relay this to the human, not retry.
+  needs_status_change?: boolean;
+  target_status?: string;
+  message?: string;
+}
+
+const STAGE_ENUM = z.enum(['product_spec', 'technical_design', 'tasks', 'handoff']);
+const ACTION_ENUM = z.enum(['approve', 'reject', 'reopen']);
+
+/**
+ * Calls hermes-agent's existing stage-transition endpoint — the SAME endpoint
+ * and payload shape the digital-factory-ui Approval card already uses
+ * (src/services/hermes-agent/tools.ts:stageTransition in workflow-frontend).
+ * All transition-effect computation (_APPROVE_EFFECTS/_REOPEN_EFFECTS),
+ * actor resolution, the backlog gate, and tasks-stage task activation are
+ * handled entirely server-side in hermes-agent (plugins/tools/approve.py) —
+ * this tool does not reimplement any of that logic, by design (see technical
+ * design's "Chosen Design").
+ */
+export async function handleUpdateFeatureStage(
+  args: { workspace_id: string; feature_id: string; stage: string; action: StageAction; comment?: string },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const { feature_id, stage, action, comment } = args;
+  try {
+    const response = await bffClient.post<StageTransitionResponse>(
+      `/bff/hermes-agent/api/v1/features/${encodeURIComponent(feature_id)}/stage-transition`,
+      { stage, action, ...(comment ? { comment } : {}) },
+    );
+    if (response.needs_status_change) {
+      // Not a failure — surface distinctly so the calling agent relays it
+      // instead of treating stage approval as having failed outright.
+      return jsonResult({ ...response, ok: false, reason: 'needs_status_change' });
+    }
+    return jsonResult(response);
+  } catch (err) {
+    return formatBffError(err);
+  }
+}
+
 // ── workspace_id / org_id resolution ──────────────────────────────────────────
 
 const WORKSPACE_ID_DESCRIPTION =
@@ -1057,6 +1115,47 @@ export function registerTools(
       annotations: READ_ONLY_ANNOTATIONS,
     },
     (args) => handleGetDocumentVersions(args, bffClient),
+  );
+
+  server.registerTool(
+    'update_feature_stage',
+    {
+      description:
+        "Approve, reject, or reopen a feature's current review stage — the SAME action the " +
+        'digital-factory-ui Approval card performs (Approve / Reject / Re-open buttons). This is a ' +
+        'HUMAN-DIRECTED action: only call this when a human has explicitly asked you to approve, ' +
+        'reject, or reopen a SPECIFIC stage — confirm which stage and which action with the human ' +
+        'first if there is any ambiguity. Do not call this on your own initiative. ' +
+        'On success, returns the resulting review_status/feature_status/current_stage — for ' +
+        'stage="tasks" approve, also creates/activates tasks (activated_tasks). If the feature is ' +
+        'still in \'backlog\', returns { ok: false, reason: "needs_status_change", target_status: ' +
+        '"in_design", ... } instead of approving — relay this to the human rather than retrying.',
+      inputSchema: {
+        workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+        feature_id: z.string().describe('Feature UUID (from search_features/get_feature)'),
+        stage: STAGE_ENUM.describe('Which lifecycle stage to act on'),
+        action: ACTION_ENUM.describe('approve | reject | reopen'),
+        comment: z
+          .string()
+          .optional()
+          .describe('Optional comment recorded with a reject or reopen action'),
+      },
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    (args) => {
+      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      if ('error' in resolved) return resolved.error;
+      return handleUpdateFeatureStage(
+        { ...args, workspace_id: resolved.workspaceId } as {
+          workspace_id: string;
+          feature_id: string;
+          stage: string;
+          action: StageAction;
+          comment?: string;
+        },
+        bffClient,
+      );
+    },
   );
 
   server.registerTool(

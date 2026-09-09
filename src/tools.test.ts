@@ -16,6 +16,7 @@ import {
   handleListWorkspaceDocuments,
   handleGetDocumentVersions,
   handleWhoami,
+  handleUpdateFeatureStage,
   resolveWorkspaceId,
   resolveOrgId,
   Feature,
@@ -25,6 +26,7 @@ import {
   ImportDocumentResponse,
   PutDocumentContentResponse,
   DocumentKind,
+  StageTransitionResponse,
   ToolResult,
 } from './tools';
 
@@ -840,6 +842,145 @@ describe('handleGetDocumentVersions', () => {
 
     expect(result.isError).toBe(true);
     expect(firstText(result)).toMatch(/document_not_found/);
+  });
+});
+
+describe('handleUpdateFeatureStage', () => {
+  const WS = 'ws-uuid-1';
+  const FID = 'feat-uuid-1';
+
+  function successResponse(overrides: Partial<StageTransitionResponse> = {}): StageTransitionResponse {
+    return {
+      ok: true,
+      feature_id: FID,
+      stage: 'product_spec',
+      action: 'approve',
+      review_status: 'approved',
+      feature_status: 'in_tdd',
+      current_stage: 'technical_design',
+      commit_sha: 'abc123',
+      branch: null,
+      ...overrides,
+    };
+  }
+
+  it('posts stage/action to the stage-transition endpoint, omitting comment when absent', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockResolvedValueOnce(successResponse());
+
+    await handleUpdateFeatureStage(
+      { workspace_id: WS, feature_id: FID, stage: 'product_spec', action: 'approve' },
+      client,
+    );
+
+    expect(client.post).toHaveBeenCalledWith(
+      `/bff/hermes-agent/api/v1/features/${FID}/stage-transition`,
+      { stage: 'product_spec', action: 'approve' },
+    );
+  });
+
+  it('includes comment in the body when provided (reject)', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockResolvedValueOnce(
+      successResponse({ action: 'reject', review_status: 'rejected', feature_status: 'in_design', current_stage: 'product_spec' }),
+    );
+
+    const result = await handleUpdateFeatureStage(
+      { workspace_id: WS, feature_id: FID, stage: 'product_spec', action: 'reject', comment: 'needs more detail' },
+      client,
+    );
+
+    expect(client.post).toHaveBeenCalledWith(
+      `/bff/hermes-agent/api/v1/features/${FID}/stage-transition`,
+      { stage: 'product_spec', action: 'reject', comment: 'needs more detail' },
+    );
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(firstText(result))).toMatchObject({ action: 'reject', review_status: 'rejected' });
+  });
+
+  it('returns the response verbatim on approve success', async () => {
+    const client = makeClient();
+    const response = successResponse();
+    client.post = jest.fn().mockResolvedValueOnce(response);
+
+    const result = await handleUpdateFeatureStage(
+      { workspace_id: WS, feature_id: FID, stage: 'product_spec', action: 'approve' },
+      client,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(firstText(result))).toEqual(response);
+  });
+
+  it('returns the response verbatim on reopen success', async () => {
+    const client = makeClient();
+    const response = successResponse({
+      action: 'reopen',
+      review_status: 'draft',
+      feature_status: 'in_design',
+      current_stage: 'product_spec',
+    });
+    client.post = jest.fn().mockResolvedValueOnce(response);
+
+    const result = await handleUpdateFeatureStage(
+      { workspace_id: WS, feature_id: FID, stage: 'product_spec', action: 'reopen', comment: 'reopening for revision' },
+      client,
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(firstText(result))).toEqual(response);
+  });
+
+  it('surfaces needs_status_change as { ok: false, reason } rather than a plain success', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockResolvedValueOnce({
+      ok: false,
+      feature_id: FID,
+      stage: 'product_spec',
+      feature_status: 'backlog',
+      needs_status_change: true,
+      target_status: 'in_design',
+      message: 'Move to In Design before approving a stage.',
+    } as StageTransitionResponse);
+
+    const result = await handleUpdateFeatureStage(
+      { workspace_id: WS, feature_id: FID, stage: 'product_spec', action: 'approve' },
+      client,
+    );
+
+    expect(result.isError).toBeFalsy();
+    const parsed = JSON.parse(firstText(result));
+    expect(parsed).toMatchObject({
+      ok: false,
+      reason: 'needs_status_change',
+      target_status: 'in_design',
+    });
+  });
+
+  it('returns auth error on BffAuthError', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockRejectedValueOnce(AUTH_ERROR);
+
+    const result = await handleUpdateFeatureStage(
+      { workspace_id: WS, feature_id: FID, stage: 'product_spec', action: 'approve' },
+      client,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toContain('Authentication failed');
+  });
+
+  it('returns error on unexpected BFF failure', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockRejectedValueOnce(SERVER_ERROR);
+
+    const result = await handleUpdateFeatureStage(
+      { workspace_id: WS, feature_id: FID, stage: 'product_spec', action: 'approve' },
+      client,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(firstText(result)).toContain('500');
   });
 });
 
