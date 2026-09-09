@@ -293,6 +293,31 @@ per version. Note: `author` is a raw user UUID, not a resolved display name. Res
 | `document_id` | string | yes | Document UUID (from `list_workspace_documents`) |
 | `limit` | number | no | Max versions to return (default 200, max 1000) |
 
+### `update_feature_stage`
+
+Approve, reject, or reopen a feature's current review stage — the same action the
+digital-factory-ui Approval card performs (Approve / Reject / Re-open buttons). This is a
+**human-directed** action: only call it when a human has explicitly asked to approve, reject, or
+reopen a *specific* stage; confirm the stage/action with the human first if there's any ambiguity.
+Calls hermes-agent's existing `stage-transition` endpoint through the BFF — no transition logic
+(the `(stage, action) → feature_status/current_stage/next_action` mapping) is reimplemented here;
+it's computed entirely server-side in hermes-agent, the same code path the web app's Approval card
+uses.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `workspace_id` | string | no | Workspace UUID |
+| `feature_id` | string | yes | Feature UUID (from `search_features`/`get_feature`) |
+| `stage` | `"product_spec"` \| `"technical_design"` \| `"tasks"` \| `"handoff"` | yes | Which lifecycle stage to act on |
+| `action` | `"approve"` \| `"reject"` \| `"reopen"` | yes | Action to perform |
+| `comment` | string | no | Optional comment recorded with a reject or reopen action |
+
+**Returns:** `{ ok, feature_id, stage, action, review_status, feature_status, current_stage, commit_sha, branch, activated_tasks }`. For `stage="tasks"` approve, also activates tasks (`activated_tasks`).
+
+**Errors:** `{ ok: false, reason: "needs_status_change", target_status: "in_design", ... }` when the
+feature is still in `backlog` — not a true failure, relay it to the human rather than retrying;
+standard `401`/other-BFF-error messages otherwise.
+
 ### `whoami`
 
 The authenticated caller's identity — profile, org memberships, and platform roles. No
@@ -334,6 +359,7 @@ McpServer (MCP TS SDK)
     ├── update_storage_document 
     ├── list_workspace_documents
     ├── get_document_versions 
+    ├── update_feature_stage 
     └── whoami 
 ```
 
