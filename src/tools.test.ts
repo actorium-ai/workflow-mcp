@@ -17,6 +17,9 @@ import {
   handleGetDocumentVersions,
   handleWhoami,
   handleUpdateFeatureStage,
+  handleCreateFeature,
+  handleMoveFeatureStatus,
+  handleCreateTasks,
   resolveWorkspaceId,
   resolveOrgId,
   Feature,
@@ -39,6 +42,7 @@ jest.mock('./bffClient', () => {
       get: jest.fn(),
       post: jest.fn(),
       put: jest.fn(),
+      patch: jest.fn(),
     })),
   };
 });
@@ -1059,5 +1063,149 @@ describe('resolveOrgId', () => {
       expect(result.error.isError).toBe(true);
       expect(firstText(result.error)).toMatch(/org_id/);
     }
+  });
+});
+
+describe('handleCreateFeature', () => {
+  const WS = 'ws-uuid-1';
+
+  it('always sends owner: "go" and returns feature_id/init_pr_url', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockResolvedValueOnce({
+      success: true,
+      data: { feature_id: 'feat-uuid-9', init_pr_url: 'https://github.com/acme/repo/pull/1' },
+    });
+
+    const result = await handleCreateFeature({ workspace_id: WS, name: 'my-feature' }, client);
+
+    expect(client.post).toHaveBeenCalledWith(`/bff/workflow-backend/api/workspaces/${WS}/features`, {
+      name: 'my-feature',
+      description: '',
+      owner: 'go',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(firstText(result))).toEqual({
+      feature_id: 'feat-uuid-9',
+      init_pr_url: 'https://github.com/acme/repo/pull/1',
+      owner: 'go',
+    });
+  });
+
+  it('includes start_stage in the body only when provided', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockResolvedValueOnce({ success: true, data: { id: 'feat-uuid-9' } });
+
+    await handleCreateFeature(
+      { workspace_id: WS, name: 'my-feature', description: 'desc', start_stage: 'product_spec' },
+      client,
+    );
+
+    expect(client.post).toHaveBeenCalledWith(`/bff/workflow-backend/api/workspaces/${WS}/features`, {
+      name: 'my-feature',
+      description: 'desc',
+      owner: 'go',
+      start_stage: 'product_spec',
+    });
+  });
+
+  it('surfaces a session_expired result on auth failure', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockRejectedValueOnce(AUTH_ERROR);
+
+    const result = await handleCreateFeature({ workspace_id: WS, name: 'my-feature' }, client);
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(firstText(result))).toMatchObject({ reason: 'session_expired' });
+  });
+});
+
+describe('handleMoveFeatureStatus', () => {
+  const WS = 'ws-uuid-1';
+  const FID = 'feat-uuid-1';
+
+  function detailResponse(status: string): FeatureDetailResponse {
+    return {
+      success: true,
+      data: {
+        id: FID,
+        feature_name: 'my-feature',
+        title: 'My Feature',
+        status,
+        current_stage: 'product_spec',
+        workspace_id: WS,
+      },
+    };
+  }
+
+  it('moves a backlog feature to in_design', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce(detailResponse('backlog'));
+    client.patch = jest.fn().mockResolvedValueOnce({});
+
+    const result = await handleMoveFeatureStatus({ workspace_id: WS, feature_id: FID, actor: 'pye@swellnetwork.io' }, client);
+
+    expect(client.patch).toHaveBeenCalledWith(
+      `/bff/workflow-backend/api/workspaces/${WS}/features/${FID}/stage`,
+      { feature_status: 'in_design', actor: 'pye@swellnetwork.io' },
+    );
+    expect(JSON.parse(firstText(result))).toMatchObject({ ok: true, action: 'moved', feature_status: 'in_design' });
+  });
+
+  it('is a safe no-op when the feature is not in backlog', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockResolvedValueOnce(detailResponse('in_implementation'));
+    client.patch = jest.fn();
+
+    const result = await handleMoveFeatureStatus({ workspace_id: WS, feature_id: FID, actor: 'agent' }, client);
+
+    expect(client.patch).not.toHaveBeenCalled();
+    expect(JSON.parse(firstText(result))).toMatchObject({ ok: true, action: 'noop', feature_status: 'in_implementation' });
+  });
+
+  it('surfaces a formatted error when the feature lookup fails', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockRejectedValueOnce(SERVER_ERROR);
+
+    const result = await handleMoveFeatureStatus({ workspace_id: WS, feature_id: FID, actor: 'agent' }, client);
+
+    expect(result.isError).toBe(true);
+  });
+});
+
+describe('handleCreateTasks', () => {
+  const WS = 'ws-uuid-1';
+  const FID = 'feat-uuid-1';
+  const TASKS = [{ id: 'T1', title: 'Do the thing' }];
+
+  it('posts the task list to the tasks endpoint', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockResolvedValueOnce({ success: true, data: { tasks: TASKS } });
+
+    const result = await handleCreateTasks({ workspace_id: WS, feature_id: FID, tasks: TASKS }, client);
+
+    expect(client.post).toHaveBeenCalledWith(
+      `/bff/workflow-backend/api/workspaces/${WS}/features/${FID}/tasks`,
+      { tasks: TASKS },
+    );
+    expect(result.isError).toBeFalsy();
+  });
+
+  it('treats HTTP 409 (tasks_already_exist) as a safe no-op', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockRejectedValueOnce(new BffRequestError('conflict', 409, { error: 'tasks_already_exist' }));
+
+    const result = await handleCreateTasks({ workspace_id: WS, feature_id: FID, tasks: TASKS }, client);
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(firstText(result))).toMatchObject({ ok: true, noop: true });
+  });
+
+  it('surfaces other errors (e.g. feature_not_tasks_approved) verbatim', async () => {
+    const client = makeClient();
+    client.post = jest.fn().mockRejectedValueOnce(new BffRequestError('unprocessable', 422, { error: 'feature_not_tasks_approved' }));
+
+    const result = await handleCreateTasks({ workspace_id: WS, feature_id: FID, tasks: TASKS }, client);
+
+    expect(result.isError).toBe(true);
   });
 });

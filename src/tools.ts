@@ -688,9 +688,154 @@ export async function handleUpdateFeatureStage(
   }
 }
 
+// ── create_feature ───────────────────────────────────────────────────────────
+
+export interface CreateFeatureResponse {
+  feature_id?: string;
+  id?: string;
+  init_pr_url?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Creates a new go-owned feature via workflow-backend's
+ * `POST /api/workspaces/:workspaceId/features`. Always sends `owner: "go"` —
+ * this is the only supported orchestrator type for agent/MCP-initiated
+ * feature creation (mirrors workflow-chat-agent's `workflow_init_feature`).
+ */
+export async function handleCreateFeature(
+  args: { workspace_id: string; name: string; description?: string; start_stage?: string },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const { workspace_id, name, description, start_stage } = args;
+  const body: Record<string, unknown> = { name, description: description ?? '', owner: 'go' };
+  if (start_stage) body.start_stage = start_stage;
+  try {
+    const response = await bffClient.post<{ success: boolean; data: CreateFeatureResponse }>(
+      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/features`,
+      body,
+    );
+    const data = response.data ?? (response as unknown as CreateFeatureResponse);
+    return jsonResult({
+      feature_id: data.feature_id ?? data.id,
+      init_pr_url: data.init_pr_url,
+      owner: 'go',
+    });
+  } catch (err) {
+    return formatBffError(err);
+  }
+}
+
+// ── move_feature_status ───────────────────────────────────────────────────────
+
+export interface MoveFeatureStatusResult {
+  ok: boolean;
+  action: 'moved' | 'noop';
+  feature_id: string;
+  feature_status: string;
+  note?: string;
+  next_action?: string;
+}
+
+/**
+ * Moves a feature out of Backlog into In Design — the ONLY transition this
+ * tool performs. Mirrors workflow-chat-agent's `move_feature_status`: reads
+ * the feature's current status first and no-ops (not an error) unless it is
+ * exactly "backlog", then PATCHes only `feature_status` (leaving stages/
+ * current_stage untouched — that's `update_feature_stage`'s job).
+ */
+export async function handleMoveFeatureStatus(
+  args: { workspace_id: string; feature_id: string; actor: string },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const { workspace_id, feature_id, actor } = args;
+
+  let detail: FeatureDetail;
+  try {
+    const response = await bffClient.get<FeatureDetailResponse>(
+      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/features/${encodeURIComponent(feature_id)}`,
+    );
+    detail = response.data;
+  } catch (err) {
+    return formatBffError(err);
+  }
+
+  const currentStatus = detail.status ?? '';
+  if (currentStatus !== 'backlog') {
+    return jsonResult({
+      ok: true,
+      action: 'noop',
+      feature_id,
+      feature_status: currentStatus,
+      note: `Feature is already past Backlog (status: ${currentStatus || 'unknown'}). No move performed.`,
+    } satisfies MoveFeatureStatusResult);
+  }
+
+  try {
+    await bffClient.patch(
+      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/features/${encodeURIComponent(feature_id)}/stage`,
+      { feature_status: 'in_design', actor },
+    );
+  } catch (err) {
+    return formatBffError(err);
+  }
+
+  return jsonResult({
+    ok: true,
+    action: 'moved',
+    feature_id,
+    feature_status: 'in_design',
+    next_action: 'Feature moved to In Design. Review the design and update it if needed before advancing to Final Design.',
+  } satisfies MoveFeatureStatusResult);
+}
+
+// ── create_tasks (bulk) ───────────────────────────────────────────────────────
+
+export interface CreateTasksTaskInput {
+  id: string;
+  title: string;
+  repo?: string;
+  depends_on?: string[];
+  actor_type?: 'agent' | 'human' | 'either';
+  model?: string;
+}
+
+/**
+ * Bulk-creates DB task rows for a feature via workflow-backend's
+ * `POST /api/workspaces/:workspaceId/features/:featureId/tasks` — the same
+ * "step d" endpoint workflow-chat-agent's backup `create_tasks` tool calls
+ * after tasks-stage approval (steps a/b/c) has already promoted the feature
+ * and merged its docs PR. This tool does ONLY task creation: it never
+ * promotes the feature, merges a docs PR, or updates feature status.
+ *
+ * Known workflow-backend guard reason codes (surfaced as-is in the error, not
+ * reworded, since this MCP has no chat-facing retry command to point at):
+ *   feature_not_tasks_approved — the tasks stage isn't approved yet, or its
+ *     docs PR hasn't merged
+ *   tasks_already_exist        — safe no-op; tasks already exist
+ */
+export async function handleCreateTasks(
+  args: { workspace_id: string; feature_id: string; tasks: CreateTasksTaskInput[] },
+  bffClient: BffClient,
+): Promise<ToolResult> {
+  const { workspace_id, feature_id, tasks } = args;
+  try {
+    const response = await bffClient.post<{ success: boolean; data: unknown }>(
+      `/bff/workflow-backend/api/workspaces/${encodeURIComponent(workspace_id)}/features/${encodeURIComponent(feature_id)}/tasks`,
+      { tasks },
+    );
+    return jsonResult(response.data);
+  } catch (err) {
+    if (err instanceof BffRequestError && err.status === 409) {
+      return jsonResult({ ok: true, noop: true, message: 'Tasks already exist for this feature — nothing to do.' });
+    }
+    return formatBffError(err);
+  }
+}
+
 // ── workspace_id / org_id resolution ──────────────────────────────────────────
 
-const WORKSPACE_ID_DESCRIPTION =
+export const WORKSPACE_ID_DESCRIPTION =
   'Workspace UUID. Optional when running under the Actorium VS Code extension — the ' +
   "connected workspace's UUID is used automatically. Pass it explicitly to target a " +
   'different workspace, or when no extension is connected.';
@@ -1163,6 +1308,111 @@ export function registerTools(server: McpServer, bffClient: BffClient, getConfig
           action: StageAction;
           comment?: string;
         },
+        bffClient,
+      );
+    },
+  );
+
+  server.registerTool(
+    'create_feature',
+    {
+      description:
+        'Create a new feature in the current workspace. The feature will be go-owned ' +
+        '(owner: "go") — this is the only supported orchestrator type for MCP-initiated ' +
+        'feature creation. On success, returns feature_id and init_pr_url so you can ' +
+        'immediately continue the workflow (e.g. call create_storage_document against the ' +
+        'new feature_id to write its product spec).',
+      inputSchema: {
+        workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+        name: z.string().describe('Feature name (required). Must be unique within the workspace.'),
+        description: z.string().optional().describe('Optional feature description.'),
+        start_stage: z
+          .string()
+          .optional()
+          .describe('Optional starting lifecycle stage, if supported by the backend.'),
+      },
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    (args) => {
+      const resolved = resolveWorkspaceId(args.workspace_id, getConfig().defaultWorkspaceId);
+      if ('error' in resolved) return resolved.error;
+      return handleCreateFeature({ ...args, workspace_id: resolved.workspaceId }, bffClient);
+    },
+  );
+
+  server.registerTool(
+    'move_feature_status',
+    {
+      description:
+        'Move a feature out of Backlog into In Design. Use this only when a human asks to ' +
+        "move/advance a feature to In Design. It sets feature_status to 'in_design' and " +
+        'touches nothing else — no stage is approved. If the feature is not in Backlog, ' +
+        'this is a safe no-op (returned as { action: "noop" }, not an error).',
+      inputSchema: {
+        workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+        feature_id: z.string().describe('Feature UUID (from search_features/get_feature)'),
+        actor: z
+          .string()
+          .optional()
+          .describe('Label recorded as the actor of this transition. Defaults to your account label.'),
+      },
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    (args) => {
+      const resolved = resolveWorkspaceId(args.workspace_id, getConfig().defaultWorkspaceId);
+      if ('error' in resolved) return resolved.error;
+      const actor = args.actor || getConfig().accountLabel || 'agent';
+      return handleMoveFeatureStatus(
+        { workspace_id: resolved.workspaceId, feature_id: args.feature_id, actor },
+        bffClient,
+      );
+    },
+  );
+
+  server.registerTool(
+    'create_tasks',
+    {
+      description:
+        'Bulk-create DB task rows for a feature. Use this after the tasks stage has been ' +
+        "approved (update_feature_stage(stage='tasks', action='approve')) when task creation " +
+        'itself still needs a manual trigger — e.g. a retry after a partial failure. This tool ' +
+        'does ONLY task creation — it never promotes the feature, merges a docs PR, or updates ' +
+        'feature status. Returns { ok: true, noop: true } if tasks already exist for this ' +
+        'feature (safe no-op), or a feature_not_tasks_approved error if the tasks stage isn\'t ' +
+        'approved yet.',
+      inputSchema: {
+        workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
+        feature_id: z.string().describe('Feature UUID (from search_features/get_feature)'),
+        tasks: z
+          .array(
+            z.object({
+              id: z.string().describe('Task ID, e.g. T1'),
+              title: z.string(),
+              repo: z.string().optional().describe('Repo slug this task targets.'),
+              depends_on: z
+                .array(z.string())
+                .optional()
+                .describe('Task IDs this task depends on. Empty/omitted means it can start immediately.'),
+              actor_type: z
+                .enum(['agent', 'human', 'either'])
+                .optional()
+                .describe("Who executes this task. Defaults to 'agent'."),
+              model: z
+                .string()
+                .optional()
+                .describe('Implementation-phase model display name for agent-actor tasks.'),
+            }),
+          )
+          .min(1)
+          .describe('Ordered list of tasks, as parsed from the feature\'s approved tasks.md.'),
+      },
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    (args) => {
+      const resolved = resolveWorkspaceId(args.workspace_id, getConfig().defaultWorkspaceId);
+      if ('error' in resolved) return resolved.error;
+      return handleCreateTasks(
+        { workspace_id: resolved.workspaceId, feature_id: args.feature_id, tasks: args.tasks },
         bffClient,
       );
     },

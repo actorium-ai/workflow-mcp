@@ -3,6 +3,7 @@ import { Config } from './config.js';
 import { BffClient } from './bffClient.js';
 import { registerReviewTools } from './reviewTools.js';
 import { registerTools } from './tools.js';
+import { registerVcsTools } from './vcsTools.js';
 
 /**
  * `getConfig` is re-invoked per tool call (see BffClient's class doc) rather
@@ -18,6 +19,7 @@ export function createServer(getConfig: () => Config): McpServer {
   const bffClient = new BffClient(getConfig);
   registerTools(server, bffClient, getConfig);
   registerReviewTools(server, getConfig);
+  registerVcsTools(server, bffClient, getConfig);
 
   return server;
 }
