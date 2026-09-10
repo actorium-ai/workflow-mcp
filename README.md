@@ -3,7 +3,7 @@
 MCP server for Actorium.
 Gives a coding agent full context on features, tasks, PRs, activity, documents, and identity.
 Mostly read-only, so it's safe to hand to an agent that only needs to *understand* a workspace —
-the exceptions are the paired-agent spec-review tools (`review_*`) and
+the exceptions are the spec-review tools (`review_*`) and
 `create_storage_document`/`update_storage_document`, which create or edit a go-owned feature's
 documents.
 
@@ -22,45 +22,6 @@ Run `actorium-mcp --version` (or `-v`) to check what's installed — prints the 
 package's version and exits immediately, without starting the MCP server. The Actorium VS
 Code extension uses this to detect whether the CLI is installed and to compare it against the
 backend's minimum supported version.
-
-### Pairing a local agent
-
-`actorium-mcp pair` registers this machine's coding agent as an addressable chat
-participant for spec review, then exits.
-
-```sh
-actorium-mcp pair --api-url http://localhost:8090 --handle claude-reviewer
-```
-
-| Flag | Default | Description |
-|---|---|---|
-| `--api-url <url>` | **required** | Backend to pair against |
-| `--handle <name>` | your OS username | The `@handle` the agent is addressed by |
-| `--no-open` | — | Don't open the approval page in a browser |
-
-Every run starts a fresh grant and supersedes the previous pairing. It does not
-reuse a cached credential: the pairing file and the server can disagree (a
-credential can outlive the record it was issued against), and short-circuiting
-on the local file turned `pair` into a silent no-op with no way to recover.
-
-**`--api-url` is required and must match the `API_URL` the MCP server runs
-with.** The pairing credential is stored in a file keyed by a hash of the
-backend url, so a pairing made against one backend is invisible to a server
-running against another: the server finds no pairing, never sends a presence
-heartbeat, and the review UI reports *"paired but unreachable"* — with nothing
-pointing at the real cause. It is deliberately not defaulted from `API_URL` or
-localhost, since an inferred backend is exactly what makes that mismatch easy to
-hit and impossible to see. `pair` prints the backend it used, and the server
-warns on stderr at startup when it has no pairing for its own `API_URL`.
-
-The exact command for a given deployment, with its backend url already filled
-in, is shown in **Settings → Local agent**.
-
-Pairing is not the same as running. Presence heartbeats come from the MCP
-**server** process (`actorium-mcp` with no subcommand), which your coding agent
-spawns over stdio — it is not something to run by hand in a terminal, where it
-will simply sit waiting on stdin. Until that server is running, a review cannot
-start.
 
 ### Default workspace/org resolution
 
@@ -324,6 +285,50 @@ The authenticated caller's identity — profile, org memberships, and platform r
 `workspace_id`/`org_id` params. Useful for sanity-checking auth/org scope before calling
 workspace-scoped tools.
 
+### `review_start`
+
+Starts a spec review between hermes and this local agent on a feature — `POST /reviews`.
+Replaces the web "Start review" modal: since this runs from inside the MCP server itself,
+the presence lease the server checks is necessarily live.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `feature_id` | string | yes | Feature UUID to review |
+| `initial_prompt` | string | yes | What to review — seeds both participants |
+| `hermes_model_id` | string | yes | Model catalog id for hermes |
+| `workspace_id` | string | no | Defaults to the linked workspace this server runs for |
+| `first_responder` | string | no | `"hermes"` or this agent; defaults to this agent (reviewer-first) |
+| `allow_broader_code_quoting` | boolean | no | Let this agent quote code from outside its working directory; confirm with the human first. Defaults to false |
+
+**Errors:** `{ ok: false, reason: "not_logged_in" }` when there's no usable login; `{ ok: false, reason: "session_expired" }` on a 401 from the server.
+
+### `review_get_turn`
+
+Polls `GET /participants/{id}/pending-turn` for a review turn owed to this agent — the
+server is the source of truth, never the local SSE buffer. A `pending: false` response is
+enriched with an explicit wait hint (or a "stop, ask the human" hint when the review is
+blocked on a human answer, or "review has ended" once it's over).
+
+### `review_submit_reply`
+
+Posts `{ content }` to `POST /threads/{session_id}/messages`; the author is derived
+server-side from the signed identity header, not sent by the client.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `session_id` | string | yes | Review session UUID owed a turn by this agent |
+| `content` | string | yes | Reply text |
+
+### `review_end`
+
+Ends the review: `POST /reviews/{session_id}/end`. The transcript is preserved — this
+stops the exchange, it does not delete it.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `session_id` | string | yes | Review session UUID to end |
+| `reason` | string | no | Defaults to `"reviewer_satisfied"` |
+
 ## Development
 
 ```sh
@@ -360,7 +365,14 @@ McpServer (MCP TS SDK)
     ├── list_workspace_documents
     ├── get_document_versions 
     ├── update_feature_stage 
-    └── whoami 
+    ├── whoami
+    ├── review_start
+    ├── review_get_turn
+    ├── review_submit_reply
+    └── review_end
+    │
+    ▼ (review_* only, plus a background channel started alongside the server)
+workflow-chat-agent, via workflow-bff's /bff/hermes-agent/api/v1/*
 ```
 
 When a bearer token is configured (`WORKFLOW_TOKEN` or the shared credential file), every request
@@ -368,3 +380,11 @@ carries `Authorization: Bearer <token>`. No DB credentials are held by this serv
 org/workspace access control is enforced entirely server-side (`workflow-bff`/`workflow-backend`
 resolve the caller's accessible orgs from the token on every request) — this server never
 bypasses it.
+
+The same access token backs a second thing, started automatically alongside the MCP server
+(see `channel.ts`): a presence heartbeat (`POST .../participants/{id}/presence` every 30s)
+and an SSE subscription (`GET .../participants/{id}/events`, wake-hints only) to
+workflow-chat-agent. `{id}` is the `agent_participant_id` claim already embedded in the
+access token's JWT — the same identity used to derive `first_responder`/message authorship
+in the `review_*` tools above. If there's no usable login, `startChannel` is a clean no-op
+(no timers, no connections) and the server warns on stderr.

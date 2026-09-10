@@ -1,26 +1,14 @@
 /**
- * Credential precedence for read-only MCP tools (see config.ts).
+ * Credential precedence for MCP tools (see config.ts).
  *
- * Design order (technical design §6 "Credential precedence"):
- *
- *   1. the extension's credential file (`auth.<hash>.json`) — this module;
- *   2. the pairing credential file (`pairing.<hash>.json`) — pairingStore.ts;
- *   3. the `WORKFLOW_TOKEN` env var.
- *
- * Implementation note: config.ts's `loadConfig` does not implement this full
- * chain yet — it checks `WORKFLOW_TOKEN` first (back-compat, and what
- * CI/headless always wants) and otherwise falls back to `auth.<hash>.json`,
- * with no pairing-file read. The `pairing.<hash>.json` fallback (step 2) is
- * wired in with the review tools (Wave 3), which fold it into the read-only
- * chain; until then the pairing file is read only by the `pair` subcommand,
- * the review channel, and the review tools.
- *
- * The `pair` subcommand, the review channel, and the review tools use
- * `pairing.<hash>.json` only — it identifies the paired local-agent
- * participant, whereas `auth.<hash>.json` identifies the developer's own user
- * token. The two files coexist per backend (same sha256-of-`bffUrl` hash
- * derivation, distinct filename prefix) so pairing never clobbers the file
- * the workflow-extension VS Code extension writes.
+ * `loadConfig` checks the `WORKFLOW_TOKEN` env var first (back-compat, and
+ * what CI/headless always wants), and otherwise falls back to this module's
+ * `auth.<hash>.json` — the credential file the workflow-extension VS Code
+ * extension maintains. This one file backs everything: the read-only tools
+ * in tools.ts, and the review tools/channel in reviewTools.ts/channel.ts,
+ * which derive their `agent_participant_id` straight from this same access
+ * token's JWT claims (see channel.ts's resolveParticipant) — there is no
+ * separate pairing credential.
  */
 import * as crypto from 'crypto';
 import * as fs from 'fs';
@@ -33,6 +21,10 @@ export interface StoredCredentials {
   workspaceId?: string;
   bffUrl?: string;
   updatedAt: number;
+  /** Display identity for the account this token belongs to — surfaced in
+   * BffClient's 401 error message (see config.ts's accountLabel). */
+  accountEmail?: string;
+  accountDisplayName?: string;
 }
 
 /**
@@ -66,23 +58,23 @@ export function credentialFilePath(bffUrl: string, homeDir: string = os.homedir(
 }
 
 /**
- * Reads the credential file for `bffUrl`. Returns null on any failure
- * (missing file, unreadable, malformed JSON, wrong shape) — callers fall back
- * to env-var config rather than throwing, since the file simply not existing
- * (extension never connected to this backend, or connected on a machine
- * without it) is the expected steady state for env-var/CI usage.
+ * Path to the per-account credential file — same bffUrl hash as
+ * credentialFilePath, plus an opaque account key (sha256 of the account id,
+ * hashed on the extension side — see credentialFile.ts's accountKeyFor —
+ * this side never sees or needs the raw account id). Two accounts signed in
+ * against the same bffUrl each get their own file here instead of fighting
+ * over the single legacy file.
  */
-export function readCredentialFile(
+export function accountCredentialFilePath(
   bffUrl: string,
+  accountKey: string,
   homeDir: string = os.homedir(),
-): StoredCredentials | null {
-  let raw: string;
-  try {
-    raw = fs.readFileSync(credentialFilePath(bffUrl, homeDir), 'utf8');
-  } catch {
-    return null;
-  }
+): string {
+  const key = crypto.createHash('sha256').update(bffUrl).digest('hex').slice(0, 16);
+  return path.join(homeDir, '.actorium', `auth.${key}.${accountKey}.json`);
+}
 
+function parseStoredCredentials(raw: string): StoredCredentials | null {
   try {
     const parsed = JSON.parse(raw) as Partial<StoredCredentials>;
     if (typeof parsed.accessToken !== 'string' || !parsed.accessToken) return null;
@@ -92,8 +84,46 @@ export function readCredentialFile(
       workspaceId: typeof parsed.workspaceId === 'string' ? parsed.workspaceId : undefined,
       bffUrl: typeof parsed.bffUrl === 'string' ? parsed.bffUrl : undefined,
       updatedAt: typeof parsed.updatedAt === 'number' ? parsed.updatedAt : 0,
+      accountEmail: typeof parsed.accountEmail === 'string' ? parsed.accountEmail : undefined,
+      accountDisplayName:
+        typeof parsed.accountDisplayName === 'string' ? parsed.accountDisplayName : undefined,
     };
   } catch {
     return null;
   }
+}
+
+function readCredentialFileAt(filePath: string): StoredCredentials | null {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return null;
+  }
+  return parseStoredCredentials(raw);
+}
+
+/**
+ * Reads the credential file for `bffUrl`. Returns null on any failure
+ * (missing file, unreadable, malformed JSON, wrong shape) — callers fall back
+ * to env-var config rather than throwing, since the file simply not existing
+ * (extension never connected to this backend, or connected on a machine
+ * without it) is the expected steady state for env-var/CI usage.
+ *
+ * When `accountKey` is given (from ACTORIUM_ACCOUNT_KEY — see config.ts),
+ * the account-scoped file is tried first; a missing account-scoped file
+ * falls back to the legacy bffUrl-only file, covering a registration made
+ * before per-account files existed, or a brief window before the extension's
+ * first sync after upgrading.
+ */
+export function readCredentialFile(
+  bffUrl: string,
+  homeDir: string = os.homedir(),
+  accountKey?: string,
+): StoredCredentials | null {
+  if (accountKey) {
+    const viaAccount = readCredentialFileAt(accountCredentialFilePath(bffUrl, accountKey, homeDir));
+    if (viaAccount) return viaAccount;
+  }
+  return readCredentialFileAt(credentialFilePath(bffUrl, homeDir));
 }

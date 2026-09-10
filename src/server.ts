@@ -4,15 +4,20 @@ import { BffClient } from './bffClient.js';
 import { registerReviewTools } from './reviewTools.js';
 import { registerTools } from './tools.js';
 
-export function createServer(config: Config): McpServer {
+/**
+ * `getConfig` is re-invoked per tool call (see BffClient's class doc) rather
+ * than resolved once here, so a renewed token or an account/workspace switch
+ * takes effect without restarting this process.
+ */
+export function createServer(getConfig: () => Config): McpServer {
   const server = new McpServer({
     name: 'actorium-mcp',
     version: '0.1.0',
   });
 
-  const bffClient = new BffClient(config.bffUrl, config.bearerToken);
-  registerTools(server, bffClient, config.defaultWorkspaceId, config.defaultOrgId);
-  registerReviewTools(server, config);
+  const bffClient = new BffClient(getConfig);
+  registerTools(server, bffClient, getConfig);
+  registerReviewTools(server, getConfig);
 
   return server;
 }
