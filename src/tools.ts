@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { BffClient, BffRequestError } from './bffClient.js';
+import { BffClient, BffAuthError, BffRequestError } from './bffClient.js';
+import { Config } from './config.js';
+import { sessionExpiredResult } from './mcpErrors.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function isUuid(s: string): boolean {
@@ -11,6 +13,12 @@ function isUuid(s: string): boolean {
 export type ToolResult = CallToolResult;
 
 function formatBffError(err: unknown): ToolResult {
+  // A persistent 401 (survived BffClient's own retry-on-401) needs the same
+  // structured, actionable signal reviewTools.ts's tools already give —
+  // every one of the ~20 tools registered from this file should tell a
+  // calling agent the same thing on genuine auth failure, not a bare thrown
+  // error's message text.
+  if (err instanceof BffAuthError) return sessionExpiredResult(err.message);
   const message = err instanceof Error ? err.message : String(err);
   return { content: [{ type: 'text', text: message }], isError: true };
 }
@@ -737,12 +745,14 @@ export function resolveOrgId(
  * registerTool calls). */
 const READ_ONLY_ANNOTATIONS = { readOnlyHint: true, openWorldHint: true };
 
-export function registerTools(
-  server: McpServer,
-  bffClient: BffClient,
-  defaultWorkspaceId?: string,
-  defaultOrgId?: string,
-): void {
+/**
+ * `getConfig` is called once per tool invocation (not once at registration
+ * time) so a renewed default workspace/org — from a workspace switch or an
+ * account switch — is picked up by the very next tool call, with no server
+ * restart. See BffClient's class doc for why the whole config is resolved
+ * fresh rather than captured in a closure.
+ */
+export function registerTools(server: McpServer, bffClient: BffClient, getConfig: () => Config): void {
   server.registerTool(
     'get_feature',
     {
@@ -758,7 +768,7 @@ export function registerTools(
       annotations: READ_ONLY_ANNOTATIONS,
     },
     (args) => {
-      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      const resolved = resolveWorkspaceId(args.workspace_id, getConfig().defaultWorkspaceId);
       if ('error' in resolved) return resolved.error;
       return handleGetFeature({ ...args, workspace_id: resolved.workspaceId }, bffClient);
     },
@@ -774,7 +784,7 @@ export function registerTools(
       annotations: READ_ONLY_ANNOTATIONS,
     },
     (args) => {
-      const resolved = resolveOrgId(args.org_id, defaultOrgId);
+      const resolved = resolveOrgId(args.org_id, getConfig().defaultOrgId);
       if ('error' in resolved) return resolved.error;
       return handleListWorkspaces({ org_id: resolved.orgId }, bffClient);
     },
@@ -798,7 +808,7 @@ export function registerTools(
       annotations: READ_ONLY_ANNOTATIONS,
     },
     (args) => {
-      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      const resolved = resolveWorkspaceId(args.workspace_id, getConfig().defaultWorkspaceId);
       if ('error' in resolved) return resolved.error;
       return handleSearchFeatures({ ...args, workspace_id: resolved.workspaceId }, bffClient);
     },
@@ -822,7 +832,7 @@ export function registerTools(
       annotations: READ_ONLY_ANNOTATIONS,
     },
     (args) => {
-      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      const resolved = resolveWorkspaceId(args.workspace_id, getConfig().defaultWorkspaceId);
       if ('error' in resolved) return resolved.error;
       return handleSearchTasks({ ...args, workspace_id: resolved.workspaceId }, bffClient);
     },
@@ -841,7 +851,7 @@ export function registerTools(
       annotations: READ_ONLY_ANNOTATIONS,
     },
     (args) => {
-      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      const resolved = resolveWorkspaceId(args.workspace_id, getConfig().defaultWorkspaceId);
       if ('error' in resolved) return resolved.error;
       return handleGetTask({ ...args, workspace_id: resolved.workspaceId }, bffClient);
     },
@@ -873,7 +883,7 @@ export function registerTools(
       annotations: READ_ONLY_ANNOTATIONS,
     },
     (args) => {
-      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      const resolved = resolveWorkspaceId(args.workspace_id, getConfig().defaultWorkspaceId);
       if ('error' in resolved) return resolved.error;
       return handleGetTaskDiff({ ...args, workspace_id: resolved.workspaceId }, bffClient);
     },
@@ -897,7 +907,7 @@ export function registerTools(
       annotations: READ_ONLY_ANNOTATIONS,
     },
     (args) => {
-      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      const resolved = resolveWorkspaceId(args.workspace_id, getConfig().defaultWorkspaceId);
       if ('error' in resolved) return resolved.error;
       return handleGetTaskReviewThread({ ...args, workspace_id: resolved.workspaceId }, bffClient);
     },
@@ -916,7 +926,7 @@ export function registerTools(
       annotations: READ_ONLY_ANNOTATIONS,
     },
     (args) => {
-      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      const resolved = resolveWorkspaceId(args.workspace_id, getConfig().defaultWorkspaceId);
       if ('error' in resolved) return resolved.error;
       return handleGetFeatureHandoff({ ...args, workspace_id: resolved.workspaceId }, bffClient);
     },
@@ -941,7 +951,7 @@ export function registerTools(
       annotations: READ_ONLY_ANNOTATIONS,
     },
     (args) => {
-      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      const resolved = resolveWorkspaceId(args.workspace_id, getConfig().defaultWorkspaceId);
       if ('error' in resolved) return resolved.error;
       return handleListWorkspaceActivity({ ...args, workspace_id: resolved.workspaceId }, bffClient);
     },
@@ -959,7 +969,7 @@ export function registerTools(
       annotations: READ_ONLY_ANNOTATIONS,
     },
     (args) => {
-      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      const resolved = resolveWorkspaceId(args.workspace_id, getConfig().defaultWorkspaceId);
       if ('error' in resolved) return resolved.error;
       return handleListWorkspaceRepos({ workspace_id: resolved.workspaceId }, bffClient);
     },
@@ -995,7 +1005,7 @@ export function registerTools(
       annotations: READ_ONLY_ANNOTATIONS,
     },
     (args) => {
-      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      const resolved = resolveWorkspaceId(args.workspace_id, getConfig().defaultWorkspaceId);
       if ('error' in resolved) return resolved.error;
       return handleReadStorageDocument(
         { ...args, workspace_id: resolved.workspaceId } as {
@@ -1029,7 +1039,7 @@ export function registerTools(
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
     (args) => {
-      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      const resolved = resolveWorkspaceId(args.workspace_id, getConfig().defaultWorkspaceId);
       if ('error' in resolved) return resolved.error;
       return handleCreateStorageDocument(
         { ...args, workspace_id: resolved.workspaceId } as {
@@ -1063,7 +1073,7 @@ export function registerTools(
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
     (args) => {
-      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      const resolved = resolveWorkspaceId(args.workspace_id, getConfig().defaultWorkspaceId);
       if ('error' in resolved) return resolved.error;
       return handleUpdateStorageDocument(
         { ...args, workspace_id: resolved.workspaceId } as {
@@ -1094,7 +1104,7 @@ export function registerTools(
       annotations: READ_ONLY_ANNOTATIONS,
     },
     (args) => {
-      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      const resolved = resolveWorkspaceId(args.workspace_id, getConfig().defaultWorkspaceId);
       if ('error' in resolved) return resolved.error;
       return handleListWorkspaceDocuments({ ...args, workspace_id: resolved.workspaceId }, bffClient);
     },
@@ -1143,7 +1153,7 @@ export function registerTools(
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
     (args) => {
-      const resolved = resolveWorkspaceId(args.workspace_id, defaultWorkspaceId);
+      const resolved = resolveWorkspaceId(args.workspace_id, getConfig().defaultWorkspaceId);
       if ('error' in resolved) return resolved.error;
       return handleUpdateFeatureStage(
         { ...args, workspace_id: resolved.workspaceId } as {

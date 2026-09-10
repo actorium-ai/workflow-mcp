@@ -1,20 +1,14 @@
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
-
+import { Config } from './config';
 import {
   consumeSseStream,
   expiryFromAccessToken,
   parseSseData,
   participantIdFromAccessToken,
-  resolveFreshParticipant,
   resolveParticipant,
   startChannel,
 } from './channel';
-import { loadPairing, savePairing } from './pairingStore';
 
 const BFF = 'http://bff.example.com';
-const CONFIG = { bffUrl: BFF };
 
 function b64url(value: unknown): string {
   return Buffer.from(JSON.stringify(value), 'utf8')
@@ -30,21 +24,12 @@ function makeAccessToken(claims: Record<string, unknown>): string {
 
 const ACCESS_TOKEN = makeAccessToken({ agent_participant_id: 'participant-123' });
 
-function writePairing(homeDir: string, accessToken: string = ACCESS_TOKEN): void {
-  savePairing(
-    BFF,
-    {
-      accessToken,
-      refreshToken: 'refresh-1',
-      expiresIn: 3600,
-      handle: 'dev-agent',
-      clientId: 'actorium-local-agent',
-      bffUrl: BFF,
-      updatedAt: Date.now(),
-    },
-    homeDir,
-  );
+function configWithToken(accessToken?: string): Config {
+  return { bffUrl: BFF, bearerToken: accessToken };
 }
+
+const LOGGED_IN = (): Config => configWithToken(ACCESS_TOKEN);
+const LOGGED_OUT = (): Config => configWithToken(undefined);
 
 function makeResponse(status: number): Response {
   return {
@@ -161,109 +146,19 @@ describe('consumeSseStream', () => {
 });
 
 describe('resolveParticipant', () => {
-  let tempHome: string;
-
-  beforeEach(() => {
-    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'actorium-channel-test-'));
+  it('returns null when there is no bearer token', () => {
+    expect(resolveParticipant(LOGGED_OUT())).toBeNull();
   });
 
-  afterEach(() => {
-    fs.rmSync(tempHome, { recursive: true, force: true });
-  });
-
-  it('returns null when there is no pairing file', () => {
-    expect(resolveParticipant(CONFIG, tempHome)).toBeNull();
-  });
-
-  it('returns the participant id and access token when paired', () => {
-    writePairing(tempHome);
-    expect(resolveParticipant(CONFIG, tempHome)).toEqual({
+  it('returns the participant id and access token when logged in', () => {
+    expect(resolveParticipant(LOGGED_IN())).toEqual({
       participantId: 'participant-123',
       accessToken: ACCESS_TOKEN,
     });
   });
 
   it('returns null when the access token lacks agent_participant_id', () => {
-    writePairing(tempHome, makeAccessToken({ sub: 'user-1' }));
-    expect(resolveParticipant(CONFIG, tempHome)).toBeNull();
-  });
-});
-
-describe('resolveFreshParticipant', () => {
-  let tempHome: string;
-
-  const FRESH_TOKEN = makeAccessToken({
-    agent_participant_id: 'participant-123',
-    exp: 4_000,
-  });
-  const EXPIRING_TOKEN = makeAccessToken({
-    agent_participant_id: 'participant-123',
-    exp: 1_030,
-  });
-  const RENEWED_TOKEN = makeAccessToken({
-    agent_participant_id: 'participant-456',
-    exp: 9_000,
-  });
-
-  // 1_000_000ms == exp 1_000s, so EXPIRING_TOKEN has 30s left (inside the skew)
-  // and FRESH_TOKEN has ~50min (outside it).
-  const now = (): number => 1_000_000;
-
-  beforeEach(() => {
-    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'actorium-fresh-test-'));
-  });
-
-  afterEach(() => {
-    fs.rmSync(tempHome, { recursive: true, force: true });
-  });
-
-  it('returns null when there is no pairing', async () => {
-    const refresh = jest.fn();
-    const result = await resolveFreshParticipant(CONFIG, { homeDir: tempHome, refresh, now });
-    expect(result).toBeNull();
-    expect(refresh).not.toHaveBeenCalled();
-  });
-
-  it('uses the stored token without refreshing when it is not near expiry', async () => {
-    writePairing(tempHome, FRESH_TOKEN);
-    const refresh = jest.fn();
-
-    const result = await resolveFreshParticipant(CONFIG, { homeDir: tempHome, refresh, now });
-
-    expect(refresh).not.toHaveBeenCalled();
-    expect(result).toEqual({ participantId: 'participant-123', accessToken: FRESH_TOKEN });
-  });
-
-  it('renews and persists both tokens when the access token is near expiry', async () => {
-    writePairing(tempHome, EXPIRING_TOKEN);
-    const refresh = jest.fn().mockResolvedValue({
-      access_token: RENEWED_TOKEN,
-      refresh_token: 'refresh-2',
-      token_type: 'Bearer',
-      expires_in: 3600,
-    });
-
-    const result = await resolveFreshParticipant(CONFIG, { homeDir: tempHome, refresh, now });
-
-    // client_id must be sent: the BFF routes to the pairing store on it
-    expect(refresh).toHaveBeenCalledWith(BFF, 'refresh-1', 'actorium-local-agent');
-    expect(result).toEqual({ participantId: 'participant-456', accessToken: RENEWED_TOKEN });
-
-    // the rotated refresh token is persisted — the old one is single-use
-    const stored = loadPairing(BFF, tempHome);
-    expect(stored?.accessToken).toBe(RENEWED_TOKEN);
-    expect(stored?.refreshToken).toBe('refresh-2');
-  });
-
-  it('falls back to the stored token when renewal fails', async () => {
-    writePairing(tempHome, EXPIRING_TOKEN);
-    const refresh = jest.fn().mockRejectedValue(new Error('offline'));
-
-    const result = await resolveFreshParticipant(CONFIG, { homeDir: tempHome, refresh, now });
-
-    // the server's own 401 is the accurate signal — don't guess locally
-    expect(result).toEqual({ participantId: 'participant-123', accessToken: EXPIRING_TOKEN });
-    expect(loadPairing(BFF, tempHome)?.refreshToken).toBe('refresh-1');
+    expect(resolveParticipant(configWithToken(makeAccessToken({ sub: 'user-1' })))).toBeNull();
   });
 });
 
@@ -279,7 +174,6 @@ describe('expiryFromAccessToken', () => {
 });
 
 describe('startChannel', () => {
-  let tempHome: string;
   let mockFetch: jest.Mock;
 
   const fetchOptions = () => ({ fetch: mockFetch as unknown as typeof fetch });
@@ -291,25 +185,21 @@ describe('startChannel', () => {
   }
 
   beforeEach(() => {
-    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'actorium-channel-test-'));
     mockFetch = jest.fn().mockResolvedValue(makeResponse(200));
   });
 
   afterEach(() => {
     jest.useRealTimers();
-    fs.rmSync(tempHome, { recursive: true, force: true });
   });
 
-  it('returns null (no-op) when there is no usable pairing', () => {
-    const handle = startChannel(CONFIG, { homeDir: tempHome, ...fetchOptions() });
+  it('returns null (no-op) when there is no usable login', () => {
+    const handle = startChannel(LOGGED_OUT, fetchOptions());
     expect(handle).toBeNull();
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('subscribes to the participant SSE event stream with the pairing auth', async () => {
-    writePairing(tempHome);
-
-    const handle = startChannel(CONFIG, { homeDir: tempHome, ...fetchOptions() });
+  it('subscribes to the participant SSE event stream with the login auth', async () => {
+    const handle = startChannel(LOGGED_IN, fetchOptions());
     expect(handle).not.toBeNull();
 
     // The subscription resolves a fresh token before opening the stream, so the
@@ -331,9 +221,8 @@ describe('startChannel', () => {
 
   it('heartbeats presence every 30s, authenticated as the participant', async () => {
     jest.useFakeTimers();
-    writePairing(tempHome);
 
-    const handle = startChannel(CONFIG, { homeDir: tempHome, ...fetchOptions() });
+    const handle = startChannel(LOGGED_IN, fetchOptions());
     expect(handle).not.toBeNull();
 
     // only the SSE subscription fires immediately; presence waits for the interval
@@ -354,11 +243,27 @@ describe('startChannel', () => {
     expect(callsTo('/presence')).toHaveLength(2); // stopped — no further heartbeats
   });
 
+  it('picks up a rotated token on the next heartbeat, without restarting', async () => {
+    jest.useFakeTimers();
+    const ROTATED_TOKEN = makeAccessToken({ agent_participant_id: 'participant-123' });
+    let current = ACCESS_TOKEN;
+
+    const handle = startChannel(() => configWithToken(current), fetchOptions());
+    expect(handle).not.toBeNull();
+
+    current = ROTATED_TOKEN;
+    await jest.advanceTimersByTimeAsync(30_000);
+
+    const [, init] = callsTo('/presence')[0];
+    expect(init.headers).toMatchObject({ Authorization: `Bearer ${ROTATED_TOKEN}` });
+
+    handle!.stop();
+  });
+
   it('stop() is idempotent and does not throw', async () => {
     jest.useFakeTimers();
-    writePairing(tempHome);
 
-    const handle = startChannel(CONFIG, { homeDir: tempHome, ...fetchOptions() })!;
+    const handle = startChannel(LOGGED_IN, fetchOptions())!;
     handle.stop();
     expect(() => handle.stop()).not.toThrow();
   });

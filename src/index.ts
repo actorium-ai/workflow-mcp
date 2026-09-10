@@ -3,15 +3,13 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import packageJson from '../package.json';
 import { startChannel } from './channel.js';
 import { loadConfig } from './config.js';
-import { runPair, runPairings, runUnpair } from './pair.js';
 import { createServer } from './server.js';
 
 /**
  * CLI entry point. Dispatches on the first argument after the script path:
  *
- *   --version | -v        print the installed version and exit
- *   pair [--handle <h>]   run the local-agent device-flow pairing flow
- *   (anything else)       start the stdio MCP server
+ *   --version | -v    print the installed version and exit
+ *   (anything else)   start the stdio MCP server
  *
  * `argv` is injected for tests; it defaults to the real `process.argv`.
  */
@@ -21,38 +19,25 @@ export async function runCli(argv: string[] = process.argv): Promise<void> {
     return;
   }
 
-  const args = argv.slice(2);
-  if (args[0] === 'pair') {
-    await runPair(args.slice(1));
-    return;
-  }
-
-  // Lists which backends this machine is paired to — the thing to compare
-  // against the API_URL the MCP server is configured with.
-  if (args[0] === 'pairings') {
-    runPairings();
-    return;
-  }
-
-  if (args[0] === 'unpair') {
-    await runUnpair(args.slice(1));
-    return;
-  }
-
+  // bffUrl is process-lifetime-stable (sourced from the immutable API_URL env
+  // var), so this loadConfig() call is fine for the startup message — only
+  // the MCP server's own tool calls need a fresh read per invocation (see
+  // BffClient's class doc); the channel re-reads it per heartbeat/reconnect
+  // itself (see channel.ts).
   const config = loadConfig();
-  const server = createServer(config);
+  const server = createServer(() => loadConfig());
 
-  // startChannel returns null when there is no usable pairing for this
-  // backend. That is a legitimate state (an unpaired install), but it is also
-  // exactly what a backend mismatch looks like — pairing files are keyed by
-  // the backend url, so a pair against a DIFFERENT API_URL leaves nothing to
-  // find here. Silence made that indistinguishable from working: no presence
-  // heartbeat is ever sent and the review UI just says "paired but
-  // unreachable". Warn on stderr (never stdout — that is the MCP transport).
-  if (startChannel(config) === null) {
+  // startChannel returns null when there is no usable login for this
+  // process — no WORKFLOW_TOKEN/credential file, or a token whose JWT
+  // carries no agent_participant_id claim. That's a legitimate state (not
+  // logged in yet), but silence made it indistinguishable from working: no
+  // presence heartbeat is ever sent and review tools would just fail with
+  // `not_logged_in`. Warn on stderr (never stdout — that is the MCP
+  // transport).
+  if (startChannel(() => loadConfig()) === null) {
     process.stderr.write(
-      `actorium-mcp: no local-agent pairing found for ${config.bffUrl} — ` +
-        `not sending presence. Run: actorium-mcp pair --api-url ${config.bffUrl}\n`,
+      `actorium-mcp: not logged in for ${config.bffUrl} — not sending presence. ` +
+        'Log in via the Actorium VS Code extension, or set WORKFLOW_TOKEN.\n',
     );
   }
   const transport = new StdioServerTransport();

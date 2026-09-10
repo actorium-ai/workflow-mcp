@@ -44,7 +44,10 @@ jest.mock('./bffClient', () => {
 });
 
 function makeClient(): jest.Mocked<BffClient> {
-  return new (BffClient as jest.MockedClass<typeof BffClient>)('http://bff.example.com', 'sess') as jest.Mocked<BffClient>;
+  return new (BffClient as jest.MockedClass<typeof BffClient>)(() => ({
+    bffUrl: 'http://bff.example.com',
+    bearerToken: 'sess',
+  })) as jest.Mocked<BffClient>;
 }
 
 function firstText(result: ToolResult): string {
@@ -136,6 +139,26 @@ describe('handleGetFeature', () => {
 
     expect(result.isError).toBe(true);
     expect(firstText(result)).toContain('Authentication failed');
+  });
+
+  // A BffAuthError only ever reaches a tool handler after BffClient's own
+  // retry-on-401 already failed — this is the structured, actionable result
+  // every one of the ~20 tools registered from tools.ts should give a calling
+  // agent on that persistent failure, matching reviewTools.ts's session_expired
+  // shape byte-for-byte (same reason/hint), not a differently-worded thrown
+  // error message.
+  it('gives a structured session_expired result (matching reviewTools.ts) on a persistent BffAuthError', async () => {
+    const client = makeClient();
+    client.get = jest.fn().mockRejectedValueOnce(AUTH_ERROR);
+
+    const result = await handleGetFeature({ workspace_id: 'ws-1', name: 'my-feature' }, client);
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(firstText(result))).toMatchObject({
+      ok: false,
+      reason: 'session_expired',
+      hint: 'Your login session is no longer valid. Log in again via the Actorium VS Code extension.',
+    });
   });
 });
 

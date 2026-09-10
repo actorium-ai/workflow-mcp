@@ -126,7 +126,7 @@ describe('E2E: workflow-mcp → BFF', () => {
 
   beforeAll(async () => {
     fakeBff = await startFakeBff();
-    client = new BffClient(fakeBff.baseUrl, 'test-token');
+    client = new BffClient(() => ({ bffUrl: fakeBff.baseUrl, bearerToken: 'test-token' }));
   });
 
   afterAll((done) => {
@@ -155,7 +155,7 @@ describe('E2E: workflow-mcp → BFF', () => {
     });
 
     it('returns auth error and re-auth guidance when the token is invalid', async () => {
-      const badClient = new BffClient(fakeBff.baseUrl, 'expired-or-wrong');
+      const badClient = new BffClient(() => ({ bffUrl: fakeBff.baseUrl, bearerToken: 'expired-or-wrong' }));
       const result = await handleGetFeature({ workspace_id: WORKSPACE_ID, name: FEATURE_NAME }, badClient);
 
       expect(result.isError).toBe(true);

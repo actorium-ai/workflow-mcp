@@ -1,3 +1,4 @@
+import * as os from 'os';
 import { readCredentialFile } from './authFile.js';
 import { findWorkspaceManifest } from './workspaceManifest.js';
 
@@ -14,14 +15,20 @@ export interface Config {
   /** Organization UUID to use when a tool call omits org_id (currently just
    * list_workspaces) — same sourcing as defaultWorkspaceId. */
   defaultOrgId?: string;
+  /** Display label (email/display name) for the account bearerToken belongs
+   * to — surfaced in BffClient's 401 error message. */
+  accountLabel?: string;
 }
 
 export const DEFAULT_BFF_URL = 'http://localhost:8090';
 
-/** Overrides applied on top of the environment, for callers that resolve the
- * backend themselves (the `pair` subcommand's --api-url flag). */
+/** Overrides applied on top of the environment — a test/CLI seam for callers
+ * that resolve the backend themselves. */
 export interface ConfigOverrides {
   bffUrl?: string;
+  /** Overrides ACTORIUM_ACCOUNT_KEY — a test/CLI seam, same pattern as
+   * bffUrl above. */
+  accountKey?: string;
 }
 
 /**
@@ -41,9 +48,23 @@ export interface ConfigOverrides {
  * when present since it answers "which workspace is THIS folder for"
  * directly, which stays correct regardless of what any other window/process
  * is doing.
+ *
+ * `accountKey` (from ACTORIUM_ACCOUNT_KEY, baked into each CLI's MCP
+ * registration alongside API_URL — see workflow-extension's mcpConnect.ts)
+ * selects a per-account credential file when present, so two accounts
+ * registered against the same bffUrl don't clobber each other. Absent, this
+ * falls back to the legacy bffUrl-only file exactly as before — a
+ * registration made before ACTORIUM_ACCOUNT_KEY existed keeps working
+ * unmodified.
+ *
+ * This is intentionally cheap to call repeatedly (a small local JSON read) —
+ * callers should call it fresh per use rather than caching the result, so a
+ * token renewed or an account switched mid-process is picked up immediately
+ * (see BffClient's class doc).
  */
 export function loadConfig(overrides: ConfigOverrides = {}): Config {
   const bffUrl = overrides.bffUrl ?? process.env.API_URL ?? DEFAULT_BFF_URL;
+  const accountKey = overrides.accountKey ?? process.env.ACTORIUM_ACCOUNT_KEY;
   const envBearerToken = process.env.WORKFLOW_TOKEN;
   const cwdWorkspace = findWorkspaceManifest();
 
@@ -56,13 +77,14 @@ export function loadConfig(overrides: ConfigOverrides = {}): Config {
     };
   }
 
-  const stored = readCredentialFile(bffUrl);
+  const stored = readCredentialFile(bffUrl, os.homedir(), accountKey);
   if (stored) {
     return {
       bffUrl,
       bearerToken: stored.accessToken,
       defaultWorkspaceId: cwdWorkspace?.workspaceId ?? stored.workspaceId,
       defaultOrgId: cwdWorkspace?.orgId ?? stored.orgId,
+      accountLabel: stored.accountDisplayName ?? stored.accountEmail,
     };
   }
 

@@ -103,21 +103,58 @@ describe('loadConfig', () => {
   it('passes the resolved bffUrl (from API_URL) to readCredentialFile', () => {
     process.env.API_URL = 'https://sw.example.com';
     delete process.env.WORKFLOW_TOKEN;
+    delete process.env.ACTORIUM_ACCOUNT_KEY;
     const readSpy = jest.spyOn(authFile, 'readCredentialFile').mockReturnValue(null);
 
     loadConfig();
 
-    expect(readSpy).toHaveBeenCalledWith('https://sw.example.com');
+    expect(readSpy).toHaveBeenCalledWith('https://sw.example.com', expect.any(String), undefined);
   });
 
   it('passes the default bffUrl to readCredentialFile when API_URL is not set', () => {
     delete process.env.API_URL;
     delete process.env.WORKFLOW_TOKEN;
+    delete process.env.ACTORIUM_ACCOUNT_KEY;
     const readSpy = jest.spyOn(authFile, 'readCredentialFile').mockReturnValue(null);
 
     loadConfig();
 
-    expect(readSpy).toHaveBeenCalledWith('http://localhost:8090');
+    expect(readSpy).toHaveBeenCalledWith('http://localhost:8090', expect.any(String), undefined);
+  });
+
+  it('passes ACTORIUM_ACCOUNT_KEY through to readCredentialFile when set', () => {
+    delete process.env.WORKFLOW_TOKEN;
+    process.env.ACTORIUM_ACCOUNT_KEY = 'abc123';
+    const readSpy = jest.spyOn(authFile, 'readCredentialFile').mockReturnValue(null);
+
+    loadConfig();
+
+    expect(readSpy).toHaveBeenCalledWith('http://localhost:8090', expect.any(String), 'abc123');
+  });
+
+  it('sets accountLabel from the stored credentials display name/email', () => {
+    delete process.env.WORKFLOW_TOKEN;
+    jest.spyOn(authFile, 'readCredentialFile').mockReturnValue({
+      accessToken: 'file-token',
+      updatedAt: 123,
+      accountEmail: 'dev@example.com',
+      accountDisplayName: 'Dev Person',
+    });
+
+    const config = loadConfig();
+    expect(config.accountLabel).toBe('Dev Person');
+  });
+
+  it('falls back to accountEmail for accountLabel when no display name is stored', () => {
+    delete process.env.WORKFLOW_TOKEN;
+    jest.spyOn(authFile, 'readCredentialFile').mockReturnValue({
+      accessToken: 'file-token',
+      updatedAt: 123,
+      accountEmail: 'dev@example.com',
+    });
+
+    const config = loadConfig();
+    expect(config.accountLabel).toBe('dev@example.com');
   });
 
   it('the cwd-based manifest still applies even when an explicit bearer token env var is set', () => {

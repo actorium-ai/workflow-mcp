@@ -1,17 +1,14 @@
-import * as os from 'os';
-
 import { Config } from './config.js';
-import { PAIRING_CLIENT_ID, refresh as refreshGrant } from './deviceFlow.js';
-import { loadPairing, savePairing } from './pairingStore.js';
 
 /**
- * The paired local agent holds a "channel" to workflow-chat-agent while the
+ * The local agent holds a "channel" to workflow-chat-agent while the
  * actorium-mcp server is running: an SSE subscription (wake hint only) plus a
  * periodic presence heartbeat (lease + last_seen only). Both are authenticated
- * with the pairing access token, whose `agent_participant_id` claim identifies
- * the participant in every URL. All chat-agent routes live under `/api/v1`;
- * through the BFF they are `/bff/hermes-agent/api/v1/...` (technical design
- * §Constraints 8).
+ * with the same login bearer token every other tool call already uses (see
+ * config.ts) — its `agent_participant_id` claim (the caller's own user id)
+ * identifies the participant in every URL. All chat-agent routes live under
+ * `/api/v1`; through the BFF they are `/bff/hermes-agent/api/v1/...`
+ * (technical design §Constraints 8).
  */
 const HERMES_AGENT_PREFIX = '/bff/hermes-agent/api/v1';
 
@@ -21,28 +18,16 @@ const HERMES_AGENT_PREFIX = '/bff/hermes-agent/api/v1';
  */
 export const PRESENCE_HEARTBEAT_MS = 30_000;
 
-/**
- * Renew the access token once it has less than this long to live. The pairing
- * client's TTL is deliberately short (1h — see devicejwt.TokenTTLFor), so a
- * server left running past that must re-mint or every authenticated call it
- * makes starts failing.
- */
-export const TOKEN_REFRESH_SKEW_MS = 120_000;
-
 /** Delay before re-opening a dropped SSE subscription. */
 const SSE_RECONNECT_DELAY_MS = 5_000;
 
 export interface ChannelOptions {
   /** Presence heartbeat cadence in ms (default PRESENCE_HEARTBEAT_MS). */
   heartbeatMs?: number;
-  /** Home-dir seam for locating the pairing file (default os.homedir()). */
-  homeDir?: string;
   /** fetch seam for tests (default global fetch). */
   fetch?: typeof fetch;
   /** Receives each parsed SSE event (best-effort wake hint). Default: no-op. */
   onEvent?: (event: unknown) => void;
-  /** Device-flow refresh seam for tests (default deviceFlow.refresh). */
-  refresh?: typeof refreshGrant;
   /** SSE reconnect delay in ms (default SSE_RECONNECT_DELAY_MS). */
   reconnectMs?: number;
 }
@@ -58,7 +43,7 @@ function base64UrlDecode(segment: string): string {
 }
 
 /**
- * Reads the `agent_participant_id` claim out of a pairing access token's JWT
+ * Reads the `agent_participant_id` claim out of an access token's JWT
  * payload. The payload is base64url-encoded JSON and is read WITHOUT signature
  * verification — the server re-verifies the token on every call, and this value
  * is only used to build the participant-scoped URLs the caller already owns.
@@ -77,11 +62,10 @@ export function participantIdFromAccessToken(accessToken: string): string | null
 }
 
 /**
- * Reads the `exp` claim (ms since epoch) out of a pairing access token, without
- * signature verification — same rationale as participantIdFromAccessToken. Used
- * only to decide when to renew locally; the server remains the authority on
- * whether a token is actually still valid. Returns null when the token is
- * malformed or carries no numeric `exp`.
+ * Reads the `exp` claim (ms since epoch) out of an access token, without
+ * signature verification — same rationale as participantIdFromAccessToken.
+ * Not used for any local renewal decision (see resolveParticipant's doc
+ * comment) — kept as a small decode utility for callers/tests that want it.
  */
 export function expiryFromAccessToken(accessToken: string): number | null {
   const parts = accessToken.split('.');
@@ -95,90 +79,31 @@ export function expiryFromAccessToken(accessToken: string): number | null {
   }
 }
 
-/** The paired identity a channel/review tool acts as. */
+/** The local-agent identity a channel/review tool acts as. */
 export interface ResolvedParticipant {
   participantId: string;
   accessToken: string;
 }
 
 /**
- * Resolves the paired local-agent participant from `pairing.<hash>.json` —
- * the pairing file ONLY (it identifies the participant; `auth.<hash>.json` is
- * the developer's own user token). Returns null when there is no usable pairing
- * (missing file, or an access token without an `agent_participant_id` claim),
- * which callers treat as "not paired".
- */
-export function resolveParticipant(config: Config, homeDir?: string): ResolvedParticipant | null {
-  const pairing = loadPairing(config.bffUrl, homeDir ?? os.homedir());
-  if (!pairing) return null;
-  const participantId = participantIdFromAccessToken(pairing.accessToken);
-  if (!participantId) return null;
-  return { participantId, accessToken: pairing.accessToken };
-}
-
-/** Seams for resolveFreshParticipant; all default to the real implementations. */
-export interface FreshParticipantOptions {
-  /** Home-dir seam for locating the pairing file (default os.homedir()). */
-  homeDir?: string;
-  /** Device-flow refresh seam for tests (default deviceFlow.refresh). */
-  refresh?: typeof refreshGrant;
-  /** Clock seam for tests (default Date.now). */
-  now?: () => number;
-}
-
-/**
- * Resolves the paired participant, renewing the access token first when it has
- * expired or is about to. This is what keeps a long-lived MCP server usable:
- * the pairing token lives only an hour, so without renewal the presence
- * heartbeat, the SSE subscription and every review tool start 401ing once the
- * server has been up that long — silently, since the channel swallows errors
- * by design. A successful renewal is persisted (rotating the refresh token
- * with it, which the BFF requires) so the next process starts fresh too.
+ * Resolves the local-agent participant straight from the login bearer token
+ * — the same token `tools.ts`/`BffClient` already use (see config.ts). There
+ * is no separate pairing file and no local refresh to manage: the VS Code
+ * extension keeps the underlying credential fresh in the background, and
+ * `loadConfig()` is cheap enough to call fresh per use (see its doc comment),
+ * so callers simply re-resolve `Config` when they want up-to-date identity
+ * rather than this function renewing anything itself.
  *
- * Falls back to the stored token when renewal fails — offline, or a revoked
- * pairing. The caller then gets the server's own 401, which is the accurate
- * signal; guessing locally would turn a transient outage into a false unpair.
+ * Returns null when there is no bearer token, or its JWT carries no
+ * `agent_participant_id` claim (e.g. a backend not yet minting the claim, or
+ * a WORKFLOW_TOKEN sourced from something other than a real login) — callers
+ * treat that as "not logged in".
  */
-export async function resolveFreshParticipant(
-  config: Config,
-  options: FreshParticipantOptions = {},
-): Promise<ResolvedParticipant | null> {
-  const homeDir = options.homeDir ?? os.homedir();
-  const pairing = loadPairing(config.bffUrl, homeDir);
-  if (!pairing) return null;
-
-  const now = options.now ?? Date.now;
-  const expiresAt = expiryFromAccessToken(pairing.accessToken);
-  let accessToken = pairing.accessToken;
-
-  if (expiresAt !== null && expiresAt - now() <= TOKEN_REFRESH_SKEW_MS) {
-    try {
-      const tokens = await (options.refresh ?? refreshGrant)(
-        config.bffUrl,
-        pairing.refreshToken,
-        pairing.clientId ?? PAIRING_CLIENT_ID,
-      );
-      accessToken = tokens.access_token;
-      savePairing(
-        config.bffUrl,
-        {
-          ...pairing,
-          accessToken: tokens.access_token,
-          refreshToken: tokens.refresh_token,
-          expiresIn: tokens.expires_in,
-          tokenType: tokens.token_type,
-          updatedAt: now(),
-        },
-        homeDir,
-      );
-    } catch {
-      // keep the stored token — see the doc comment above
-    }
-  }
-
-  const participantId = participantIdFromAccessToken(accessToken);
+export function resolveParticipant(config: Config): ResolvedParticipant | null {
+  if (!config.bearerToken) return null;
+  const participantId = participantIdFromAccessToken(config.bearerToken);
   if (!participantId) return null;
-  return { participantId, accessToken };
+  return { participantId, accessToken: config.bearerToken };
 }
 
 function isAbortError(err: unknown): boolean {
@@ -251,8 +176,8 @@ export async function consumeSseStream(
 
 /**
  * Opens the SSE subscription once and reads it to completion. `authorize` is
- * called per attempt rather than once per channel so a reconnect after the
- * hourly token expiry carries a renewed token.
+ * called per attempt rather than once per channel so a reconnect after a
+ * rotated login token carries a fresh one.
  */
 async function subscribeEvents(
   fetchImpl: typeof fetch,
@@ -281,9 +206,8 @@ async function subscribeEvents(
 /**
  * Keeps the SSE subscription open for the life of the channel, re-opening it
  * after each drop until the channel is stopped. Without this the stream is a
- * one-shot: the first drop (a proxy idle timeout, a deploy, or the 401 that
- * follows token expiry) would silently end the wake hints for the rest of the
- * process's life.
+ * one-shot: the first drop (a proxy idle timeout, a deploy, or a 401) would
+ * silently end the wake hints for the rest of the process's life.
  */
 async function subscribeWithReconnect(
   fetchImpl: typeof fetch,
@@ -317,14 +241,20 @@ function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 /**
- * Starts the paired local agent's channel: an SSE subscription to the
- * participant's event stream (wake hint only) plus a 30s presence heartbeat
- * (lease/last_seen only). Returns null — without starting any timers or
- * connections — when there is no usable pairing, so an unpaired server run is a
- * clean no-op. The returned handle's stop() tears the channel down.
+ * Starts the local agent's channel: an SSE subscription to the participant's
+ * event stream (wake hint only) plus a 30s presence heartbeat (lease/last_seen
+ * only). Returns null — without starting any timers or connections — when
+ * there is no usable login (no bearer token, or a token whose JWT carries no
+ * `agent_participant_id` claim), so a logged-out server run is a clean no-op.
+ * The returned handle's stop() tears the channel down.
+ *
+ * `getConfig` is re-invoked (not just once at startup) for every heartbeat
+ * and every SSE (re)connect, so a login token rotated in the background by
+ * the VS Code extension is picked up without restarting this process.
  */
-export function startChannel(config: Config, options: ChannelOptions = {}): ChannelHandle | null {
-  const participant = resolveParticipant(config, options.homeDir);
+export function startChannel(getConfig: () => Config, options: ChannelOptions = {}): ChannelHandle | null {
+  const config = getConfig();
+  const participant = resolveParticipant(config);
   if (!participant) return null;
 
   const fetchImpl = options.fetch ?? fetch;
@@ -337,14 +267,12 @@ export function startChannel(config: Config, options: ChannelOptions = {}): Chan
   const presenceUrl = `${baseUrl}${HERMES_AGENT_PREFIX}/participants/${participantId}/presence`;
   const eventsUrl = `${baseUrl}${HERMES_AGENT_PREFIX}/participants/${participantId}/events`;
 
-  // Resolved per request, not captured once: the pairing token expires after an
-  // hour, so a channel that reused the startup token would go quietly dead on a
-  // server that stays up longer than that.
+  // Resolved per request, not captured once: the underlying login token can
+  // rotate while this server stays up, so re-reading getConfig() here picks
+  // that up immediately — the same rationale as BffClient's per-request
+  // getConfig() call.
   const authorize = async (): Promise<Record<string, string> | null> => {
-    const fresh = await resolveFreshParticipant(config, {
-      homeDir: options.homeDir,
-      refresh: options.refresh,
-    });
+    const fresh = resolveParticipant(getConfig());
     if (!fresh) return null;
     return { Authorization: `Bearer ${fresh.accessToken}` };
   };

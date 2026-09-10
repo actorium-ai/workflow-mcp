@@ -1,13 +1,9 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
 
+import { Config } from './config';
 import { registerReviewTools, reviewGetTurn, reviewStart, reviewSubmitReply } from './reviewTools';
-import { savePairing } from './pairingStore';
 
 const BFF = 'http://bff.example.com';
-const CONFIG = { bffUrl: BFF };
 
 function b64url(value: unknown): string {
   return Buffer.from(JSON.stringify(value), 'utf8')
@@ -21,21 +17,8 @@ const ACCESS_TOKEN = `${b64url({ alg: 'HS256', typ: 'JWT' })}.${b64url({
   agent_participant_id: 'participant-123',
 })}.signature`;
 
-function writePairing(homeDir: string): void {
-  savePairing(
-    BFF,
-    {
-      accessToken: ACCESS_TOKEN,
-      refreshToken: 'refresh-1',
-      expiresIn: 3600,
-      handle: 'dev-agent',
-      clientId: 'actorium-local-agent',
-      bffUrl: BFF,
-      updatedAt: Date.now(),
-    },
-    homeDir,
-  );
-}
+const CONFIG: Config = { bffUrl: BFF, bearerToken: ACCESS_TOKEN };
+const LOGGED_OUT_CONFIG: Config = { bffUrl: BFF };
 
 function makeResponse(status: number, body: unknown): Response {
   const text = typeof body === 'string' ? body : JSON.stringify(body);
@@ -54,35 +37,28 @@ function firstText(result: { content: Array<{ type: string; text?: string }> }):
 }
 
 describe('reviewGetTurn', () => {
-  let tempHome: string;
   let mockFetch: jest.Mock;
 
   beforeEach(() => {
-    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'actorium-reviewtools-test-'));
     mockFetch = jest.fn();
   });
 
-  afterEach(() => {
-    fs.rmSync(tempHome, { recursive: true, force: true });
-  });
+  const options = () => ({ fetch: mockFetch as unknown as typeof fetch });
 
-  const options = () => ({ homeDir: tempHome, fetch: mockFetch as unknown as typeof fetch });
-
-  it('returns a not_paired error when there is no pairing, without calling the server', async () => {
-    const result = await reviewGetTurn(CONFIG, options());
+  it('returns a not_logged_in error when there is no login, without calling the server', async () => {
+    const result = await reviewGetTurn(() => LOGGED_OUT_CONFIG, options());
 
     expect(result.isError).toBe(true);
-    expect(JSON.parse(firstText(result))).toMatchObject({ ok: false, reason: 'not_paired' });
+    expect(JSON.parse(firstText(result))).toMatchObject({ ok: false, reason: 'not_logged_in' });
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it('polls pending-turn authenticated as the participant and returns the body', async () => {
-    writePairing(tempHome);
     mockFetch.mockResolvedValueOnce(
       makeResponse(200, { turn: { session_id: 's1', prompt: 'hi', seed: 'spec excerpt' } }),
     );
 
-    const result = await reviewGetTurn(CONFIG, options());
+    const result = await reviewGetTurn(() => CONFIG, options());
 
     expect(result.isError).toBeFalsy();
     expect(JSON.parse(firstText(result))).toEqual({
@@ -96,46 +72,75 @@ describe('reviewGetTurn', () => {
   });
 
   it('returns an error result carrying the status and server code when rejected', async () => {
-    writePairing(tempHome);
     mockFetch.mockResolvedValueOnce(makeResponse(403, { detail: { code: 'not_your_participant' } }));
 
-    const result = await reviewGetTurn(CONFIG, options());
+    const result = await reviewGetTurn(() => CONFIG, options());
 
     expect(result.isError).toBe(true);
     expect(firstText(result)).toContain('403');
     expect(firstText(result)).toContain('not_your_participant');
   });
+
+  it('returns a session_expired error on a 401 that a retry with the same token cannot fix', async () => {
+    mockFetch.mockResolvedValueOnce(makeResponse(401, { detail: { code: 'invalid_token' } }));
+
+    const result = await reviewGetTurn(() => CONFIG, options());
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(firstText(result))).toMatchObject({ ok: false, reason: 'session_expired' });
+    // getConfig() always returns the same (already-expired) token here, so
+    // there is nothing fresher to retry with — exactly one request goes out.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries once with a freshly-read token after a 401, and succeeds if the retry works', async () => {
+    mockFetch
+      .mockResolvedValueOnce(makeResponse(401, { detail: { code: 'invalid_token' } }))
+      .mockResolvedValueOnce(makeResponse(200, { turn: { session_id: 's1' } }));
+
+    const FRESH_TOKEN = `${b64url({ alg: 'HS256', typ: 'JWT' })}.${b64url({
+      agent_participant_id: 'participant-123',
+    })}.signature2`;
+    const FRESH_CONFIG: Config = { bffUrl: BFF, bearerToken: FRESH_TOKEN };
+
+    // The VS Code extension can rotate the token in the background between
+    // this handler starting and its first request landing — getConfig()
+    // reflects that on the very next read, same as BffClient's own retry.
+    let reads = 0;
+    const getConfig = () => (reads++ === 0 ? CONFIG : FRESH_CONFIG);
+
+    const result = await reviewGetTurn(getConfig, options());
+
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(firstText(result))).toEqual({ turn: { session_id: 's1' } });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch.mock.calls[0][1]).toMatchObject({ headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } });
+    expect(mockFetch.mock.calls[1][1]).toMatchObject({ headers: { Authorization: `Bearer ${FRESH_TOKEN}` } });
+  });
 });
 
 describe('reviewSubmitReply', () => {
-  let tempHome: string;
   let mockFetch: jest.Mock;
 
   beforeEach(() => {
-    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'actorium-reviewtools-test-'));
     mockFetch = jest.fn();
   });
 
-  afterEach(() => {
-    fs.rmSync(tempHome, { recursive: true, force: true });
-  });
+  const options = () => ({ fetch: mockFetch as unknown as typeof fetch });
 
-  const options = () => ({ homeDir: tempHome, fetch: mockFetch as unknown as typeof fetch });
-
-  it('returns a not_paired error when there is no pairing', async () => {
-    const result = await reviewSubmitReply(CONFIG, { session_id: 's1', content: 'hi' }, options());
+  it('returns a not_logged_in error when there is no login', async () => {
+    const result = await reviewSubmitReply(() => LOGGED_OUT_CONFIG, { session_id: 's1', content: 'hi' }, options());
 
     expect(result.isError).toBe(true);
-    expect(JSON.parse(firstText(result))).toMatchObject({ ok: false, reason: 'not_paired' });
+    expect(JSON.parse(firstText(result))).toMatchObject({ ok: false, reason: 'not_logged_in' });
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it('POSTs {content} to the messages route and returns the body', async () => {
-    writePairing(tempHome);
     mockFetch.mockResolvedValueOnce(makeResponse(200, { id: 'msg-1' }));
 
     const result = await reviewSubmitReply(
-      CONFIG,
+      () => CONFIG,
       { session_id: 's1', content: 'review reply' },
       options(),
     );
@@ -154,11 +159,10 @@ describe('reviewSubmitReply', () => {
   });
 
   it('surfaces an out_of_turn (409) rejection as an error result', async () => {
-    writePairing(tempHome);
     mockFetch.mockResolvedValueOnce(makeResponse(409, { detail: { code: 'out_of_turn' } }));
 
     const result = await reviewSubmitReply(
-      CONFIG,
+      () => CONFIG,
       { session_id: 's1', content: 'x' },
       options(),
     );
@@ -172,7 +176,7 @@ describe('reviewSubmitReply', () => {
 describe('registerReviewTools', () => {
   it('registers both tools with the specified names, copy, and annotations', () => {
     const server = new McpServer({ name: 'test', version: '0.0.0' });
-    registerReviewTools(server, CONFIG);
+    registerReviewTools(server, () => CONFIG);
 
     const tools = (
       server as unknown as {
@@ -204,17 +208,6 @@ describe('registerReviewTools', () => {
 });
 
 describe('reviewStart turn order', () => {
-  let tempHome: string;
-
-  beforeEach(() => {
-    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'actorium-start-test-'));
-    writePairing(tempHome);
-  });
-
-  afterEach(() => {
-    fs.rmSync(tempHome, { recursive: true, force: true });
-  });
-
   function okFetch() {
     return jest.fn().mockResolvedValue(makeResponse(200, { session_id: 's-1' }));
   }
@@ -222,9 +215,9 @@ describe('reviewStart turn order', () => {
   async function startWith(overrides: Record<string, unknown> = {}) {
     const fetchImpl = okFetch();
     await reviewStart(
-      CONFIG,
+      () => CONFIG,
       { initial_prompt: 'review it', feature_id: 'f-1', hermes_model_id: 'm-1', workspace_id: 'ws-1', ...overrides },
-      { homeDir: tempHome, fetch: fetchImpl as unknown as typeof fetch },
+      { fetch: fetchImpl as unknown as typeof fetch },
     );
     return JSON.parse((fetchImpl.mock.calls[0][1] as RequestInit).body as string);
   }
@@ -251,21 +244,9 @@ describe('reviewStart turn order', () => {
 });
 
 describe('reviewGetTurn wait hints', () => {
-  let tempHome: string;
-
-  beforeEach(() => {
-    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'actorium-hint-test-'));
-    writePairing(tempHome);
-  });
-
-  afterEach(() => {
-    fs.rmSync(tempHome, { recursive: true, force: true });
-  });
-
   async function hintFor(body: unknown): Promise<string> {
     const fetchImpl = jest.fn().mockResolvedValue(makeResponse(200, body));
-    const result = await reviewGetTurn(CONFIG, {
-      homeDir: tempHome,
+    const result = await reviewGetTurn(() => CONFIG, {
       fetch: fetchImpl as unknown as typeof fetch,
     });
     const text = (result.content?.[0] as { text: string }).text;
@@ -328,8 +309,7 @@ describe('reviewGetTurn wait hints', () => {
 
   it('leaves an actual turn untouched', async () => {
     const fetchImpl = jest.fn().mockResolvedValue(makeResponse(200, { turn: { session_id: 's-1' } }));
-    const result = await reviewGetTurn(CONFIG, {
-      homeDir: tempHome,
+    const result = await reviewGetTurn(() => CONFIG, {
       fetch: fetchImpl as unknown as typeof fetch,
     });
     const body = JSON.parse((result.content?.[0] as { text: string }).text);

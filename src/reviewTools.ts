@@ -2,16 +2,17 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { Config } from './config.js';
-import { FreshParticipantOptions, resolveFreshParticipant } from './channel.js';
+import { resolveParticipant } from './channel.js';
+import { sessionExpiredResult } from './mcpErrors.js';
 
 /**
- * Review tooling for the paired local agent (technical design §6). Two tools:
+ * Review tooling for the local agent (technical design §6). Two tools:
  * `review_get_turn` polls the SERVER's pending-turn endpoint — the source of
  * truth, never the local SSE buffer (the realtime bus drops on QueueFull with
  * no replay) — and `review_submit_reply` posts the agent's reply into the
  * review session. The author is derived server-side from the signed identity
  * header, so the client sends only `{ content }`. Both tools authenticate with
- * the pairing access token (`pairing.<hash>.json`), which carries the
+ * the same login bearer token every other tool uses, whose JWT carries the
  * `agent_participant_id` claim the BFF propagates into chat-agent's signed
  * `X-BFF-Identity` header.
  */
@@ -20,12 +21,8 @@ const HERMES_AGENT_PREFIX = '/bff/hermes-agent/api/v1';
 type ToolResult = CallToolResult;
 
 export interface ReviewToolOptions {
-  /** Home-dir seam for locating the pairing file (default os.homedir()). */
-  homeDir?: string;
   /** fetch seam for tests (default global fetch). */
   fetch?: typeof fetch;
-  /** Device-flow refresh seam for tests (default deviceFlow.refresh). */
-  refresh?: FreshParticipantOptions['refresh'];
 }
 
 function jsonResult(value: unknown): ToolResult {
@@ -36,15 +33,15 @@ function errorResult(message: string): ToolResult {
   return { content: [{ type: 'text', text: message }], isError: true };
 }
 
-function notPairedError(): ToolResult {
+function notLoggedInError(): ToolResult {
   return {
     content: [
       {
         type: 'text',
         text: JSON.stringify({
           ok: false,
-          reason: 'not_paired',
-          hint: 'Run `actorium-mcp pair` to pair this local agent first.',
+          reason: 'not_logged_in',
+          hint: 'Log in via the Actorium VS Code extension, then try again.',
         }),
       },
     ],
@@ -53,26 +50,45 @@ function notPairedError(): ToolResult {
 }
 
 async function requestReview(
-  config: Config,
+  getConfig: () => Config,
   path: string,
   init: RequestInit,
   accessToken: string,
   options: ReviewToolOptions,
 ): Promise<ToolResult> {
   const fetchImpl = options.fetch ?? fetch;
-  const url = `${config.bffUrl.replace(/\/$/, '')}${path}`;
+  const url = `${getConfig().bffUrl.replace(/\/$/, '')}${path}`;
 
-  let response: Response;
-  try {
-    response = await fetchImpl(url, {
+  const doFetch = (token: string): Promise<Response> =>
+    fetchImpl(url, {
       ...init,
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${token}`,
       },
     });
+
+  let response: Response;
+  try {
+    response = await doFetch(accessToken);
   } catch (err) {
     return errorResult(`Review request failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  if (response.status === 401) {
+    // The VS Code extension renews the login token on its own timer,
+    // independent of tool-call timing — the token may have rotated between
+    // when this handler started and when the request actually went out (the
+    // same rationale as BffClient's request()). Re-resolve once and retry
+    // before giving up.
+    const fresh = resolveParticipant(getConfig());
+    if (fresh && fresh.accessToken !== accessToken) {
+      try {
+        response = await doFetch(fresh.accessToken);
+      } catch (err) {
+        return errorResult(`Review request failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
 
   const text = await response.text().catch(() => '');
@@ -84,23 +100,12 @@ async function requestReview(
   }
 
   if (response.ok) return jsonResult(body);
-  // A 401 here means renewal could not save the pairing (revoked, or offline
-  // past the refresh token's life). Say so explicitly — the agent otherwise
-  // reports a bare 401 and the human has no idea the fix is to re-pair.
+  // A 401 here means the login session is no longer valid (expired, revoked,
+  // or the token was otherwise rejected server-side). Say so explicitly — the
+  // agent otherwise reports a bare 401 and the human has no idea the fix is
+  // to log in again.
   if (response.status === 401) {
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            ok: false,
-            reason: 'pairing_expired',
-            hint: 'This pairing is no longer valid. Run `actorium-mcp pair` to pair again.',
-          }),
-        },
-      ],
-      isError: true,
-    };
+    return sessionExpiredResult();
   }
   return errorResult(
     `Review request failed: ${response.status} ${response.statusText}${text ? ` — ${text}` : ''}`,
@@ -109,7 +114,7 @@ async function requestReview(
 
 /**
  * Polls `GET /participants/{id}/pending-turn` for a review turn owed to this
- * paired agent — the server is the source of truth, not the local SSE buffer.
+ * local agent — the server is the source of truth, not the local SSE buffer.
  *
  * A `pending: false` response is enriched with an explicit wait instruction.
  * The bare payload reads as a terminal answer ("nothing owed"), and agents
@@ -117,15 +122,12 @@ async function requestReview(
  * stopped — abandoning the exchange while the counterpart was still composing
  * its turn. It means "not yet", and the response has to say so.
  */
-export async function reviewGetTurn(config: Config, options: ReviewToolOptions = {}): Promise<ToolResult> {
-  const participant = await resolveFreshParticipant(config, {
-    homeDir: options.homeDir,
-    refresh: options.refresh,
-  });
-  if (!participant) return notPairedError();
+export async function reviewGetTurn(getConfig: () => Config, options: ReviewToolOptions = {}): Promise<ToolResult> {
+  const participant = resolveParticipant(getConfig());
+  if (!participant) return notLoggedInError();
   const id = encodeURIComponent(participant.participantId);
   const result = await requestReview(
-    config,
+    getConfig,
     `${HERMES_AGENT_PREFIX}/participants/${id}/pending-turn`,
     { method: 'GET' },
     participant.accessToken,
@@ -209,18 +211,15 @@ function workingDescription(hermesStatus: unknown): string {
  * derived server-side from the signed identity header.
  */
 export async function reviewSubmitReply(
-  config: Config,
+  getConfig: () => Config,
   args: { session_id: string; content: string },
   options: ReviewToolOptions = {},
 ): Promise<ToolResult> {
-  const participant = await resolveFreshParticipant(config, {
-    homeDir: options.homeDir,
-    refresh: options.refresh,
-  });
-  if (!participant) return notPairedError();
+  const participant = resolveParticipant(getConfig());
+  if (!participant) return notLoggedInError();
   const sessionId = encodeURIComponent(args.session_id);
   return requestReview(
-    config,
+    getConfig,
     `${HERMES_AGENT_PREFIX}/threads/${sessionId}/messages`,
     { method: 'POST', body: JSON.stringify({ content: args.content }) },
     participant.accessToken,
@@ -246,7 +245,7 @@ export async function reviewSubmitReply(
  * replaces.
  */
 export async function reviewStart(
-  config: Config,
+  getConfig: () => Config,
   args: {
     initial_prompt: string;
     feature_id: string;
@@ -257,11 +256,9 @@ export async function reviewStart(
   },
   options: ReviewToolOptions = {},
 ): Promise<ToolResult> {
-  const participant = await resolveFreshParticipant(config, {
-    homeDir: options.homeDir,
-    refresh: options.refresh,
-  });
-  if (!participant) return notPairedError();
+  const config = getConfig();
+  const participant = resolveParticipant(config);
+  if (!participant) return notLoggedInError();
 
   const workspaceId = args.workspace_id ?? config.defaultWorkspaceId;
   if (!workspaceId) {
@@ -271,7 +268,7 @@ export async function reviewStart(
   }
 
   return requestReview(
-    config,
+    getConfig,
     `${HERMES_AGENT_PREFIX}/reviews`,
     {
       method: 'POST',
@@ -305,19 +302,16 @@ export async function reviewStart(
  * The transcript is preserved; this stops the exchange, it does not delete it.
  */
 export async function reviewEnd(
-  config: Config,
+  getConfig: () => Config,
   args: { session_id: string; reason?: string },
   options: ReviewToolOptions = {},
 ): Promise<ToolResult> {
-  const participant = await resolveFreshParticipant(config, {
-    homeDir: options.homeDir,
-    refresh: options.refresh,
-  });
-  if (!participant) return notPairedError();
+  const participant = resolveParticipant(getConfig());
+  if (!participant) return notLoggedInError();
 
   const sessionId = encodeURIComponent(args.session_id);
   return requestReview(
-    config,
+    getConfig,
     `${HERMES_AGENT_PREFIX}/reviews/${sessionId}/end`,
     { method: 'POST', body: JSON.stringify({ reason: args.reason || 'reviewer_satisfied' }) },
     participant.accessToken,
@@ -326,20 +320,26 @@ export async function reviewEnd(
 }
 
 /**
- * Registers the paired-agent review tools on the MCP server. Handlers resolve
- * the pairing lazily at call time, so a pairing created after server start is
+ * Registers the local-agent review tools on the MCP server. Handlers resolve
+ * the login identity lazily at call time, so logging in after server start is
  * picked up without a restart.
+ */
+/**
+ * `getConfig` is called once per tool invocation (not once at registration
+ * time) so an account/backend switch is picked up by the very next call —
+ * see BffClient's class doc for the same rationale applied to the read-only
+ * tools in tools.ts.
  */
 export function registerReviewTools(
   server: McpServer,
-  config: Config,
+  getConfig: () => Config,
   options: ReviewToolOptions = {},
 ): void {
   server.registerTool(
     'review_start',
     {
       description:
-        'Start a spec review between hermes and this paired agent on a feature. ' +
+        'Start a spec review between hermes and this local agent on a feature. ' +
         'Use when the human asks to start/run a spec review. The review then appears live in the web UI. ' +
         'Starting one commits you to running it: post your review, then poll review_get_turn and keep ' +
         'taking turns until you call review_end or the review ends on its own.',
@@ -370,7 +370,7 @@ export function registerReviewTools(
       },
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
-    (args) => reviewStart(config, args, options),
+    (args) => reviewStart(getConfig, args, options),
   );
 
   server.registerTool(
@@ -389,14 +389,14 @@ export function registerReviewTools(
       },
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
-    (args) => reviewEnd(config, args, options),
+    (args) => reviewEnd(getConfig, args, options),
   );
 
   server.registerTool(
     'review_get_turn',
     {
       description:
-        'Check whether a review turn is owed to this paired agent. ' +
+        'Check whether a review turn is owed to this local agent. ' +
         'Returns {"pending": false} while the other participant is still working — that means ' +
         'NOT YET, not finished. A counterpart turn involves a model thinking and writing, so it ' +
         'commonly takes 30-120s to appear. After posting a reply, keep calling this every ~10s ' +
@@ -405,7 +405,7 @@ export function registerReviewTools(
       inputSchema: {},
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    () => reviewGetTurn(config, options),
+    () => reviewGetTurn(getConfig, options),
   );
 
   server.registerTool(
@@ -423,6 +423,6 @@ export function registerReviewTools(
       },
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
-    (args) => reviewSubmitReply(config, args, options),
+    (args) => reviewSubmitReply(getConfig, args, options),
   );
 }
