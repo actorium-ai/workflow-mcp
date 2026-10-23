@@ -22,12 +22,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '26'
           registry-url: 'https://registry.npmjs.org'
           cache: 'pnpm'
 
       # Trusted publishing needs npm >= 11.5.1 — pin explicitly rather than
-      # relying on whatever setup-node's Node 22 build happens to bundle.
+      # relying on whatever setup-node's Node 26 build happens to bundle.
       - run: npm install -g npm@latest
 
       - run: pnpm install --frozen-lockfile
