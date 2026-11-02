@@ -3,7 +3,7 @@
 MCP server giving agents full context on the workflow platform: features (with bundled
 docs/tasks/activity), tasks (PR diffs, review threads, execution info), documents, and caller
 identity. Mostly read-only — the exceptions are the paired-agent spec-review tools (`review_*`)
-and `create_storage_document`/`update_storage_document`, which create or edit a go-owned
+and `create_storage_document`/`update_storage_document`, which create or edit a
 feature's documents in storage-service; everything else only reads state.
 
 ## Prerequisites
@@ -24,7 +24,7 @@ Resolve a feature by name and get everything about it in one call.
 
 ```
 get_feature({ name: "workflow-db" })
-// → { id, feature_name, title, status, current_stage, owner, workspace_id,
+// → { id, feature_name, title, status, current_stage, workspace_id,
 //     task_counts, documents: [...], tasks: [...], activity: [...] (capped at 50), source_state }
 ```
 
@@ -51,7 +51,7 @@ get_task_review_thread({ task_id, repo? })
 ### `get_feature_handoff` / `list_workspace_activity` / `list_workspace_repos`
 
 ```
-get_feature_handoff({ feature_id })    → go-owned features only; 404 if none/not go-owned
+get_feature_handoff({ feature_id })    → 404 if none
 list_workspace_activity({ feature_id?, task_id?, audience?, page?, limit? })
 // → audit trail; audience: "client" | "internal"; paginated, default limit 50, max 1000
 list_workspace_repos({ workspace_id }) → repo id/url/default branch/tags, which is the management repo
@@ -83,8 +83,6 @@ get_document_versions({ document_id, limit? })
 //   limit default 200, max 1000
 ```
 
-`ts`-owned features' canonical documents remain git-backed and are unaffected by these tools —
-access them via the Claude Code executor's standard clone-and-Read model instead.
 
 ### `create_storage_document` / `update_storage_document`
 
