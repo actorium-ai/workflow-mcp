@@ -24,7 +24,6 @@ const SEEDED_FEATURE: Feature = {
   title: 'E2E Test Feature',
   status: 'in_implementation',
   current_stage: 'tasks',
-  owner: 'go',
 };
 
 interface FakeBff {
@@ -141,7 +140,7 @@ describe('E2E: workflow-mcp → BFF', () => {
       const feature = JSON.parse(firstText(result));
       expect(feature.id).toBe(FEATURE_UUID);
       expect(feature.feature_name).toBe(FEATURE_NAME);
-      expect(feature.owner).toBe('go');
+      expect(feature).not.toHaveProperty('owner');
       expect(feature.tasks).toEqual([{ id: 'task-1', task_name: 'T1', status: 'ready' }]);
       expect(feature.activity).toHaveLength(1);
       expect(feature.source_state).toEqual({ stale: false });

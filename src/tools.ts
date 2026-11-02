@@ -44,7 +44,6 @@ export interface Feature {
   title: string;
   status: string;
   current_stage: string;
-  owner?: string;
 }
 
 export interface FeaturesResponse {
@@ -68,7 +67,6 @@ export interface FeatureDetail {
   status: string;
   current_stage: string;
   next_action?: string;
-  owner?: string;
   updated_at?: string;
   workspace_id: string;
   task_counts?: Record<string, number>;
@@ -316,7 +314,7 @@ export async function handleGetFeatureHandoff(
   } catch (err) {
     if (err instanceof BffRequestError && err.status === 404) {
       return notFoundResult(
-        `handoff_not_found: feature ${feature_id} is not go-owned, or has no handoff yet`,
+        `handoff_not_found: feature ${feature_id} has no handoff yet`,
       );
     }
     return formatBffError(err);
@@ -698,17 +696,15 @@ export interface CreateFeatureResponse {
 }
 
 /**
- * Creates a new go-owned feature via workflow-backend's
- * `POST /api/workspaces/:workspaceId/features`. Always sends `owner: "go"` —
- * this is the only supported orchestrator type for agent/MCP-initiated
- * feature creation (mirrors workflow-chat-agent's `workflow_init_feature`).
+ * Creates a new feature via workflow-backend's
+ * `POST /api/workspaces/:workspaceId/features`.
  */
 export async function handleCreateFeature(
   args: { workspace_id: string; name: string; description?: string; start_stage?: string },
   bffClient: BffClient,
 ): Promise<ToolResult> {
   const { workspace_id, name, description, start_stage } = args;
-  const body: Record<string, unknown> = { name, description: description ?? '', owner: 'go' };
+  const body: Record<string, unknown> = { name, description: description ?? '' };
   if (start_stage) body.start_stage = start_stage;
   try {
     const response = await bffClient.post<{ success: boolean; data: CreateFeatureResponse }>(
@@ -719,7 +715,6 @@ export async function handleCreateFeature(
     return jsonResult({
       feature_id: data.feature_id ?? data.id,
       init_pr_url: data.init_pr_url,
-      owner: 'go',
     });
   } catch (err) {
     return formatBffError(err);
@@ -1062,8 +1057,8 @@ export function registerTools(server: McpServer, bffClient: BffClient, getConfig
     'get_feature_handoff',
     {
       description:
-        'Get a go-owned feature\'s handoff state — the multi-repo final-PR fan-out as it nears ' +
-        'completion. 404 if the feature isn\'t go-owned or has no handoff yet.',
+        'Get a feature\'s handoff state — the multi-repo final-PR fan-out as it nears ' +
+        'completion. 404 if the feature has no handoff yet.',
       inputSchema: {
         workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
         feature_id: z.string().describe('Feature UUID'),
@@ -1137,10 +1132,9 @@ export function registerTools(server: McpServer, bffClient: BffClient, getConfig
     'read_storage_document',
     {
       description:
-        "Read a document's content from storage-service — a go-owned feature's canonical doc (via " +
+        "Read a document's content from storage-service — a feature's canonical doc (via " +
         'kind) or any other document, including a workspace-root file with no owning feature (via ' +
-        'path). Scoped to storage-service-backed documents only — a go-owned feature\'s ts-owned ' +
-        'siblings remain git-backed.',
+        'path). Scoped to storage-service-backed documents only.',
       inputSchema: {
         workspace_id: z.string().optional().describe(WORKSPACE_ID_DESCRIPTION),
         feature_id: z.string().optional().describe(FEATURE_ID_OPTIONAL_DESCRIPTION),
@@ -1168,7 +1162,7 @@ export function registerTools(server: McpServer, bffClient: BffClient, getConfig
     'create_storage_document',
     {
       description:
-        'Create a document in storage-service, seeding its initial content in one call — a go-owned ' +
+        'Create a document in storage-service, seeding its initial content in one call — a ' +
         'feature\'s canonical doc (via kind) or any other document, including a workspace-root file ' +
         'with no owning feature (via path, feature_id omitted). Create-or-get, not upsert: if a ' +
         'document at this path already exists, the EXISTING document is returned UNCHANGED — this ' +
@@ -1204,7 +1198,7 @@ export function registerTools(server: McpServer, bffClient: BffClient, getConfig
     {
       description:
         "Update an existing document's content in storage-service, creating a new version — a " +
-        'go-owned feature\'s canonical doc (via kind) or any other document, including a ' +
+        'feature\'s canonical doc (via kind) or any other document, including a ' +
         'workspace-root file with no owning feature (via path, feature_id omitted). Edit-only — ' +
         '404s with document_not_found if no document at this path exists yet; call ' +
         'create_storage_document first.',
@@ -1317,9 +1311,7 @@ export function registerTools(server: McpServer, bffClient: BffClient, getConfig
     'create_feature',
     {
       description:
-        'Create a new feature in the current workspace. The feature will be go-owned ' +
-        '(owner: "go") — this is the only supported orchestrator type for MCP-initiated ' +
-        'feature creation. On success, returns feature_id and init_pr_url so you can ' +
+        'Create a new feature in the current workspace. On success, returns feature_id and init_pr_url so you can ' +
         'immediately continue the workflow (e.g. call create_storage_document against the ' +
         'new feature_id to write its product spec).',
       inputSchema: {

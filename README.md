@@ -4,7 +4,7 @@ MCP server for Actorium.
 Gives a coding agent full context on features, tasks, PRs, activity, documents, and identity.
 Mostly read-only, so it's safe to hand to an agent that only needs to *understand* a workspace —
 the exceptions are the spec-review tools (`review_*`) and
-`create_storage_document`/`update_storage_document`, which create or edit a go-owned feature's
+`create_storage_document`/`update_storage_document`, which create or edit a feature's
 documents.
 
 ## Requirements
@@ -138,14 +138,14 @@ includes `truncated: true` when a cap was hit.
 
 ### `get_feature_handoff`
 
-A go-owned feature's handoff state — the multi-repo final-PR fan-out as it nears completion.
+A feature's handoff state — the multi-repo final-PR fan-out as it nears completion.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `workspace_id` | string | no | Workspace UUID |
 | `feature_id` | string | yes | Feature UUID |
 
-**Errors:** `{ ok: false, reason: "handoff_not_found: ..." }` if the feature isn't go-owned or has no handoff yet.
+**Errors:** `{ ok: false, reason: "handoff_not_found: ..." }` if the feature has no handoff yet.
 
 ### `list_workspace_activity`
 
@@ -177,10 +177,9 @@ workspace-root document with no owning feature at all, `feature_id` omitted). Pa
 
 ### `read_storage_document`
 
-Read a document's content from storage-service — a go-owned feature's canonical doc (via `kind`)
+Read a document's content from storage-service — a feature's canonical doc (via `kind`)
 or any other document, including a workspace-root file with no owning feature (via `path`).
-Scoped to storage-service-backed documents only — a go-owned feature's ts-owned siblings remain
-git-backed.
+Scoped to storage-service-backed documents only.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -193,7 +192,7 @@ git-backed.
 
 ### `create_storage_document`
 
-Create a document in storage-service, seeding its initial content in one call — a go-owned
+Create a document in storage-service, seeding its initial content in one call — a
 feature's canonical doc (via `kind`) or any other document, including a workspace-root file with
 no owning feature (via `path`, `feature_id` omitted). Create-or-get, not upsert: if a document at
 this path already exists, the EXISTING document is returned unchanged — this never overwrites
@@ -213,7 +212,7 @@ existing content. Use `update_storage_document` to modify a document that alread
 
 ### `update_storage_document`
 
-Update an existing document's content in storage-service, creating a new version — a go-owned
+Update an existing document's content in storage-service, creating a new version — a
 feature's canonical doc (via `kind`) or any other document, including a workspace-root file with
 no owning feature (via `path`, `feature_id` omitted). Edit-only — 404s with
 `document_not_found` if no document at this path exists yet; call `create_storage_document`
@@ -282,8 +281,7 @@ standard `401`/other-BFF-error messages otherwise.
 ### `create_feature`
 
 Creates a new feature in a workspace — same effect as the Board modal's "New feature", or
-workflow-chat-agent's `workflow_init_feature` tool. Always sends `owner: "go"`; this is the only
-supported orchestrator type for MCP-initiated creation. `POST .../workspaces/:workspaceId/features`.
+workflow-chat-agent's `workflow_init_feature` tool. `POST .../workspaces/:workspaceId/features`.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -292,7 +290,7 @@ supported orchestrator type for MCP-initiated creation. `POST .../workspaces/:wo
 | `description` | string | no | Optional feature description |
 | `start_stage` | string | no | Optional starting lifecycle stage, if supported by the backend |
 
-**Returns:** `{ feature_id, init_pr_url, owner: "go" }`. Continue immediately with
+**Returns:** `{ feature_id, init_pr_url }`. Continue immediately with
 `create_storage_document` (`kind: "product_spec"`) against the new `feature_id`.
 
 ### `move_feature_status`
@@ -447,7 +445,7 @@ driving that exact flow from an MCP client (Claude Code, another agent, or a scr
 
 ```
 create_feature
-      │  owner: "go", status: backlog
+      │  status: backlog
       ▼
 create_storage_document(kind="product_spec")  ──┐
       │                                          │  drafting loop: update_storage_document
@@ -478,7 +476,7 @@ vcs_pr_context / vcs_pr_diff / vcs_pr_files      (gather context to review a tas
       ▼
 vcs_pr_review(event="APPROVE" | "REQUEST_CHANGES")
       ▼
-update_feature_stage(stage="handoff", action="approve")     (go-owned features only)
+update_feature_stage(stage="handoff", action="approve")
       │  status → done
 ```
 
@@ -487,7 +485,7 @@ update_feature_stage(stage="handoff", action="approve")     (go-owned features o
 1. **Create the feature.**
    ```
    create_feature(name="checkout-retry-logic", description="Retry failed payment webhooks")
-   → { feature_id: "…", init_pr_url: "…", owner: "go" }
+   → { feature_id: "…", init_pr_url: "…" }
    ```
    The feature starts in `status: "backlog"`, `current_stage: "product_spec"`.
 
@@ -526,7 +524,7 @@ update_feature_stage(stage="handoff", action="approve")     (go-owned features o
    gather context, then `vcs_pr_review` to post a verdict — the two-call pattern means your
    narrative lands as a comment even if GitHub blocks the formal review event for self-review.
 
-7. **Handoff and done.** For a go-owned feature nearing completion, `get_feature_handoff` reports
+7. **Handoff and done.** For a feature nearing completion, `get_feature_handoff` reports
    the multi-repo final-PR fan-out; `update_feature_stage(stage="handoff", action="approve")` closes
    it out to `status: "done"`.
 
