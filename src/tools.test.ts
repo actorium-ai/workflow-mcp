@@ -1069,7 +1069,7 @@ describe('resolveOrgId', () => {
 describe('handleCreateFeature', () => {
   const WS = 'ws-uuid-1';
 
-  it('always sends owner: "go" and returns feature_id/init_pr_url', async () => {
+  it('does not send owner and returns feature_id/init_pr_url', async () => {
     const client = makeClient();
     client.post = jest.fn().mockResolvedValueOnce({
       success: true,
@@ -1081,13 +1081,11 @@ describe('handleCreateFeature', () => {
     expect(client.post).toHaveBeenCalledWith(`/bff/workflow-backend/api/workspaces/${WS}/features`, {
       name: 'my-feature',
       description: '',
-      owner: 'go',
     });
     expect(result.isError).toBeFalsy();
     expect(JSON.parse(firstText(result))).toEqual({
       feature_id: 'feat-uuid-9',
       init_pr_url: 'https://github.com/acme/repo/pull/1',
-      owner: 'go',
     });
   });
 
@@ -1103,7 +1101,6 @@ describe('handleCreateFeature', () => {
     expect(client.post).toHaveBeenCalledWith(`/bff/workflow-backend/api/workspaces/${WS}/features`, {
       name: 'my-feature',
       description: 'desc',
-      owner: 'go',
       start_stage: 'product_spec',
     });
   });
